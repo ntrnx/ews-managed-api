@@ -37,10 +37,11 @@ namespace Microsoft.Exchange.WebServices.Data
         /// Create a new instance of class that implements the <see cref="IEwsHttpWebRequest"/> interface.
         /// </summary>
         /// <param name="uri">The URI.</param>
+        /// <param name="checkCertificates">Whether to check for valid certificates</param>
         /// <returns>
         /// An object that implements the <see cref="IEwsHttpWebRequest"/> interface.
         /// </returns>
-        IEwsHttpWebRequest CreateRequest(Uri uri);
+        IEwsHttpWebRequest CreateRequest(Uri uri, bool checkCertificates);
 
         /// <summary>
         /// Creates the exception response.

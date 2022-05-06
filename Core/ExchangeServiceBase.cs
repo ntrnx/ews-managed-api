@@ -96,7 +96,8 @@ namespace Microsoft.Exchange.WebServices.Data
         private IWebProxy webProxy;
         private IDictionary<string, string> httpHeaders = new Dictionary<string, string>();
         private IDictionary<string, string> httpResponseHeaders = new Dictionary<string, string>();
-        private IEwsHttpWebRequestFactory ewsHttpWebRequestFactory = new EwsHttpWebRequestFactory();  
+        private IEwsHttpWebRequestFactory ewsHttpWebRequestFactory = new EwsHttpWebRequestFactory();
+        private bool checkCertificates = true;
         #endregion
 
         #region Event handlers
@@ -141,7 +142,7 @@ namespace Microsoft.Exchange.WebServices.Data
                 throw new ServiceLocalException(string.Format(Strings.UnsupportedWebProtocol, url.Scheme));
             }
 
-            IEwsHttpWebRequest request = this.HttpWebRequestFactory.CreateRequest(url);
+            IEwsHttpWebRequest request = this.HttpWebRequestFactory.CreateRequest(url, checkCertificates);
             try
             {
 
@@ -916,6 +917,12 @@ namespace Microsoft.Exchange.WebServices.Data
         public IDictionary<string, string> HttpResponseHeaders
         {
             get { return this.httpResponseHeaders; }
+        }
+
+        public bool CheckCertificates
+        {
+            get { return this.checkCertificates; }
+            set { this.checkCertificates = value; }
         }
 
         /// <summary>

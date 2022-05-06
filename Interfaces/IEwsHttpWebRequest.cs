@@ -28,7 +28,9 @@ namespace Microsoft.Exchange.WebServices.Data
     using System;
     using System.IO;
     using System.Net;
+    using System.Net.Http;
     using System.Net.Http.Headers;
+    using System.Net.Security;
     using System.Security.Cryptography.X509Certificates;
     using System.Threading;
     using System.Threading.Tasks;
@@ -203,5 +205,10 @@ namespace Microsoft.Exchange.WebServices.Data
         {
             get; set;
         }
+
+        /// <summary>
+        /// Gets or sets a callback for validating server certificates
+        /// </summary>
+//        Func<HttpRequestMessage, X509Certificate2, X509Chain, SslPolicyErrors, bool> ServerCertificateCustomValidationCallback { get; set; }
     }
 }
