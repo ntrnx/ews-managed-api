@@ -748,6 +748,15 @@ namespace Microsoft.Exchange.WebServices.Data
             TimeZoneInfo sourceTimeZone,
             TimeZoneInfo destinationTimeZone)
         {
+            // on 1981-04-01 at 0:00 clock in the Soviet Union were shifted forward 1 hour. 
+            // therefore time on 1981-04-01 between 0:00.000 and 0:59:59.999 is invalid
+            // let's just add 1 hour to avoid the exception
+            if ((1981 <= dateTime.Year && dateTime.Year <= 1984) && 
+                dateTime.Month == 4 && dateTime.Day == 1 &&
+                dateTime.Hour == 0 && dateTime.Minute == 0 && dateTime.Second == 0)
+            {
+                dateTime = dateTime.AddHours(1);
+            }
             try
             {
                 return TimeZoneInfo.ConvertTime(

@@ -23,6 +23,8 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
+using Microsoft.Exchange.WebServices.Settings;
+
 namespace Microsoft.Exchange.WebServices.Data
 {
     using System;
@@ -136,6 +138,8 @@ namespace Microsoft.Exchange.WebServices.Data
             bool acceptGzipEncoding,
             bool allowAutoRedirect)
         {
+			checkCertificates = GlobalSettings.CheckCertificates;
+
             // Verify that the protocol is something that we can handle
             if ((url.Scheme != "http") && (url.Scheme != "https"))
             {

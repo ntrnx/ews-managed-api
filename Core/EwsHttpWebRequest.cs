@@ -71,8 +71,10 @@ namespace Microsoft.Exchange.WebServices.Data
             {
                 return true;
             }
+            /*
             Console.WriteLine("RemoteCertificateValidation: Certificate: {0}", certificate.ToString());
             Console.WriteLine("RemoteCertificateValidation: Errors: {0}", sslPolicyErrors.ToString());
+            */
             // If the certificate is a valid, signed certificate, return true.
             if (sslPolicyErrors == System.Net.Security.SslPolicyErrors.None)
             {

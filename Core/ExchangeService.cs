@@ -24,6 +24,7 @@
  */
 
 using System.Security.Cryptography;
+using Microsoft.Exchange.WebServices.Settings;
 
 namespace Microsoft.Exchange.WebServices.Data
 {
@@ -5126,10 +5127,11 @@ namespace Microsoft.Exchange.WebServices.Data
         /// the specified version of EWS and scoped to the system's current time zone.
         /// </summary>
         /// <param name="requestedServerVersion">The version of EWS that the service targets.</param>
-        public ExchangeService(ExchangeVersion requestedServerVersion)
+        public ExchangeService(ExchangeVersion requestedServerVersion, bool checkCertificates)
             : base(requestedServerVersion)
-        {
-        }
+		{
+			GlobalSettings.CheckCertificates = checkCertificates;
+		}
 
         /// <summary>
         /// Initializes a new instance of the <see cref="ExchangeService"/> class, targeting
