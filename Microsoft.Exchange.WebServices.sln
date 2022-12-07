@@ -3,7 +3,7 @@ Microsoft Visual Studio Solution File, Format Version 12.00
 # Visual Studio 15
 VisualStudioVersion = 15.0.26730.15
 MinimumVisualStudioVersion = 10.0.40219.1
-Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Microsoft.Exchange.WebServices.NETStandard", "Microsoft.Exchange.WebServices.NETStandard.csproj", "{F0F6D9CB-DB44-4959-B673-555413E3B4E5}"
+Project("{9A19103F-16F7-4668-BE54-9A1E7A4F7556}") = "Microsoft.Exchange.WebServices", "Microsoft.Exchange.WebServices.csproj", "{F0F6D9CB-DB44-4959-B673-555413E3B4E5}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

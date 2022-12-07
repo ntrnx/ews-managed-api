@@ -3,8 +3,8 @@
   <PropertyGroup>
     <VersionPrefix>2.0.0</VersionPrefix>
     <TargetFramework>net6.0</TargetFramework>
-    <AssemblyName>Microsoft.Exchange.WebServices.NET6</AssemblyName>
-    <PackageId>Microsoft.Exchange.WebServices.NET6</PackageId>
+    <AssemblyName>Microsoft.Exchange.WebServices</AssemblyName>
+    <PackageId>Microsoft.Exchange.WebServices</PackageId>
     <GenerateAssemblyTitleAttribute>false</GenerateAssemblyTitleAttribute>
     <GenerateAssemblyDescriptionAttribute>false</GenerateAssemblyDescriptionAttribute>
     <GenerateAssemblyCompanyAttribute>false</GenerateAssemblyCompanyAttribute>
@@ -18,7 +18,7 @@
     <RepositoryType>git</RepositoryType>
     <PackageTags>ews exchange office365 Microsoft Web API Email Client Library C#</PackageTags>
     <PackageProjectUrl>https://github.com/sherlock1982/ews-managed-api</PackageProjectUrl>
-    <Title>Microsoft.Exchange.WebServices.NET6</Title>
+    <Title>Microsoft.Exchange.WebServices</Title>
     <Description>The Exchange Web Services (EWS) Managed API provides a managed interface for developing .NET client applications that use EWS. By using the EWS Managed API, you can access almost all the information stored in an Office 365, Exchange Online, or Exchange Server mailbox.</Description>
     <PackageReleaseNotes>removed obsolete WebRequests and switched to HttpClient internally
 fixed issue with file attachements downloads
