@@ -9,7 +9,6 @@ namespace Microsoft.Exchange.WebServices.Data
     {
         public EwsHttpClientException(Exception e) : base(e.Message)
         {
-
         }
 
         public EwsHttpClientException(HttpResponseMessage response): base(response.ReasonPhrase)
