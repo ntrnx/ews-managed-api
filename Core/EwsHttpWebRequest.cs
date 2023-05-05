@@ -93,7 +93,7 @@ namespace Microsoft.Exchange.WebServices.Data
                         if ((certificate.Subject == certificate.Issuer) &&
                         (status.Status == System.Security.Cryptography.X509Certificates.X509ChainStatusFlags.UntrustedRoot))
                         {
-                            // Self-signed certificates with an untrusted root are valid. 
+                            // Self-signed certificates with an untrusted root are valid.
                             continue;
                         }
                         else
@@ -107,7 +107,7 @@ namespace Microsoft.Exchange.WebServices.Data
                         }
                     }
                 }
-                // When processing reaches this line, the only errors in the certificate chain are 
+                // When processing reaches this line, the only errors in the certificate chain are
                 // untrusted root errors for self-signed certificates. These certificates are valid
                 // for default Exchange server installations, so return true.
                 return true;
@@ -170,14 +170,22 @@ namespace Microsoft.Exchange.WebServices.Data
             }
 
             HttpResponseMessage response = null;
-            try
+
+            response = await _httpClient.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, token);
+
+
+			/* hide converting httpClient.SendAsync exception to EwsHttpClientException
+			   to get exact httpClient response
+
+			try
             {
-                response = await _httpClient.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, token);
             }
             catch (Exception exception)
             {
                 throw new EwsHttpClientException(exception);
             }
+            */
+
             if (!response.IsSuccessStatusCode)
                 throw new EwsHttpClientException(response);
 
@@ -341,7 +349,7 @@ namespace Microsoft.Exchange.WebServices.Data
         }
 
         /// <summary>
-        /// Gets or sets the name of the connection group for the request. 
+        /// Gets or sets the name of the connection group for the request.
         /// </summary>
         public string ConnectionGroupName
         {
