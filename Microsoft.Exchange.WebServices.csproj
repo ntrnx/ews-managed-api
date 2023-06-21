@@ -2,7 +2,7 @@
 
   <PropertyGroup>
     <VersionPrefix>2.0.0</VersionPrefix>
-    <TargetFramework>net6.0</TargetFramework>
+    <TargetFramework>net7.0</TargetFramework>
     <AssemblyName>Microsoft.Exchange.WebServices</AssemblyName>
     <PackageId>Microsoft.Exchange.WebServices</PackageId>
     <GenerateAssemblyTitleAttribute>false</GenerateAssemblyTitleAttribute>
