@@ -1,4 +1,4 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
     <VersionPrefix>2.0.0</VersionPrefix>
@@ -28,6 +28,7 @@ added cancellation token for most of methods
     </PackageReleaseNotes>
     <Version>2.0.0-beta2</Version>
     <PackageLicenseFile>license.txt</PackageLicenseFile>
+    <NoWarn>$(NoWarn);CA1416;SYSLIB0014;SYSLIB0028</NoWarn>
   </PropertyGroup>
 
   <ItemGroup>
