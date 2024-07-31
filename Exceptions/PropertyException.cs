@@ -24,6 +24,7 @@
  */
 
 
+// ReSharper disable CheckNamespace
 namespace Microsoft.Exchange.WebServices.Data
 {
     using System;
@@ -44,7 +45,6 @@ namespace Microsoft.Exchange.WebServices.Data
         /// </summary>
         /// <param name="name">The name of the property that is at the origin of the exception.</param>
         public PropertyException(string name)
-            : base()
         {
             this.name = name;
         }
@@ -80,6 +80,7 @@ namespace Microsoft.Exchange.WebServices.Data
 		/// </summary>
 		/// <param name="info">The object that holds the serialized object data.</param>
 		/// <param name="context">The contextual information about the source or destination.</param>
+		[Obsolete]
 		protected PropertyException(SerializationInfo info, StreamingContext context)
 			: base(info, context)
 		{
@@ -90,9 +91,11 @@ namespace Microsoft.Exchange.WebServices.Data
 		/// <param name="info">The object that holds the serialized object data. </param>
 		/// <param name="context">The contextual information about the source or destination. </param>
 		/// <exception cref="T:System.ArgumentNullException">The <paramref name="info" /> object is a null reference (Nothing in Visual Basic). </exception>
+		[Obsolete]
 		public override void GetObjectData(SerializationInfo info, StreamingContext context)
 		{
-			EwsUtilities.Assert(info != null, "PropertyException.GetObjectData", "info is null");
+			// EwsUtilities.Assert(info != null, "PropertyException.GetObjectData", "info is null");
+			if (info == null) throw new ArgumentNullException(nameof(info));
 
 			base.GetObjectData(info, context);
 

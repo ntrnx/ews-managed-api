@@ -23,6 +23,7 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
+// ReSharper disable CheckNamespace
 namespace Microsoft.Exchange.WebServices.Data
 {
     using System;
@@ -34,7 +35,7 @@ namespace Microsoft.Exchange.WebServices.Data
     public class ServerBusyException : ServiceResponseException
     {
         private const string BackOffMillisecondsKey = @"BackOffMilliseconds";
-        private readonly int backOffMilliseconds;
+        private readonly int _backOffMilliseconds;
 
         /// <summary>
         /// Initializes a new instance of the <see cref="ServerBusyException"/> class.
@@ -43,9 +44,9 @@ namespace Microsoft.Exchange.WebServices.Data
         public ServerBusyException(ServiceResponse response) 
             : base(response)
         {
-            if (response.ErrorDetails != null && response.ErrorDetails.ContainsKey(ServerBusyException.BackOffMillisecondsKey))
+            if (response.ErrorDetails != null && response.ErrorDetails.TryGetValue(ServerBusyException.BackOffMillisecondsKey, out string errorDetail))
             {
-                Int32.TryParse(response.ErrorDetails[ServerBusyException.BackOffMillisecondsKey], out this.backOffMilliseconds);
+                Int32.TryParse(errorDetail, out _backOffMilliseconds);
             }
 		}
 
@@ -54,23 +55,26 @@ namespace Microsoft.Exchange.WebServices.Data
 		/// </summary>
 		/// <param name="info">The object that holds the serialized object data.</param>
 		/// <param name="context">The contextual information about the source or destination.</param>
+		[Obsolete]
 		protected ServerBusyException(SerializationInfo info, StreamingContext context)
 			: base(info, context)
 		{
-			this.backOffMilliseconds = info.GetInt32("BackOffMilliseconds");
+			this._backOffMilliseconds = info.GetInt32("BackOffMilliseconds");
 		}
 
 		/// <summary>Sets the <see cref="T:System.Runtime.Serialization.SerializationInfo" /> object with the parameter name and additional exception information.</summary>
 		/// <param name="info">The object that holds the serialized object data. </param>
 		/// <param name="context">The contextual information about the source or destination. </param>
 		/// <exception cref="T:System.ArgumentNullException">The <paramref name="info" /> object is a null reference (Nothing in Visual Basic). </exception>
+		[Obsolete]
 		public override void GetObjectData(SerializationInfo info, StreamingContext context)
 		{
-			EwsUtilities.Assert(info != null, "ServerBusyException.GetObjectData", "info is null");
+			// EwsUtilities.Assert(info != null, "ServerBusyException.GetObjectData", "info is null");
+			if (info == null) throw new ArgumentNullException(nameof(info));
 
 			base.GetObjectData(info, context);
 
-			info.AddValue("BackOffMilliseconds", this.backOffMilliseconds);
+			info.AddValue("BackOffMilliseconds", this._backOffMilliseconds);
 		}
 
 		/// <summary>
@@ -81,7 +85,7 @@ namespace Microsoft.Exchange.WebServices.Data
         {
             get
             {
-                return this.backOffMilliseconds;
+                return this._backOffMilliseconds;
             }
         }
     }

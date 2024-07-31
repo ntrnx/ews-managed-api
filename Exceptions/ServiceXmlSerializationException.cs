@@ -65,6 +65,7 @@ namespace Microsoft.Exchange.WebServices.Data
 		/// </summary>
 		/// <param name="info">The object that holds the serialized object data.</param>
 		/// <param name="context">The contextual information about the source or destination.</param>
+		[Obsolete]
 		protected ServiceXmlSerializationException(SerializationInfo info, StreamingContext context)
 			: base(info, context)
 	    {

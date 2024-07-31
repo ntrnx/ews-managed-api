@@ -23,9 +23,14 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
+// ReSharper disable CheckNamespace
+// ReSharper disable RedundantUsingDirective
+
+using System;
+
 namespace Microsoft.Exchange.WebServices.Data
 {
-    using System.Runtime.Serialization;
+	using System.Runtime.Serialization;
     using System.Xml;
 
     /// <summary>
@@ -53,6 +58,7 @@ namespace Microsoft.Exchange.WebServices.Data
         /// </summary>
         /// <param name="info">The <see cref="SerializationInfo"/> that holds the serialized object data about the exception being thrown.</param>
         /// <param name="context">The <see cref="StreamingContext"/> that contains contextual information about the source or destination.</param>
+		[Obsolete]
         protected XmlDtdException(SerializationInfo info, StreamingContext context)
             : base(info, context)
         {

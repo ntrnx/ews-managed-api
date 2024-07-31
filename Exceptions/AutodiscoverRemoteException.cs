@@ -1,28 +1,30 @@
 /*
- * Exchange Web Services Managed API
- *
- * Copyright (c) Microsoft Corporation
- * All rights reserved.
- *
- * MIT License
- *
- * Permission is hereby granted, free of charge, to any person obtaining a copy of this
- * software and associated documentation files (the "Software"), to deal in the Software
- * without restriction, including without limitation the rights to use, copy, modify, merge,
- * publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
- * to whom the Software is furnished to do so, subject to the following conditions:
- *
- * The above copyright notice and this permission notice shall be included in all copies or
- * substantial portions of the Software.
- *
- * THE SOFTWARE IS PROVIDED *AS IS*, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
- * INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
- * PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
- * FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
- * OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
- * DEALINGS IN THE SOFTWARE.
- */
+* Exchange Web Services Managed API
+*
+* Copyright (c) Microsoft Corporation
+* All rights reserved.
+*
+* MIT License
+*
+* Permission is hereby granted, free of charge, to any person obtaining a copy of this
+* software and associated documentation files (the "Software"), to deal in the Software
+* without restriction, including without limitation the rights to use, copy, modify, merge,
+* publish, distribute, sublicense, and/or sell copies of the Software, and to permit persons
+* to whom the Software is furnished to do so, subject to the following conditions:
+*
+* The above copyright notice and this permission notice shall be included in all copies or
+* substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED *AS IS*, WITHOUT WARRANTY OF ANY KIND, EXPRESS OR IMPLIED,
+* INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY, FITNESS FOR A PARTICULAR
+* PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE
+* FOR ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR
+* OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+* DEALINGS IN THE SOFTWARE.
+*/
 
+// ReSharper disable once CheckNamespace
+// ReSharper disable RedundantNameQualifier
 namespace Microsoft.Exchange.WebServices.Autodiscover
 {
     using System;
@@ -41,8 +43,7 @@ namespace Microsoft.Exchange.WebServices.Autodiscover
         /// </summary>
         /// <param name="error">The error.</param>
         public AutodiscoverRemoteException(AutodiscoverError error)
-            : base()
-        {
+		{
             this.error = error;
         }
 
@@ -77,6 +78,7 @@ namespace Microsoft.Exchange.WebServices.Autodiscover
 		/// </summary>
 		/// <param name="info">The object that holds the serialized object data.</param>
 		/// <param name="context">The contextual information about the source or destination.</param>
+		[Obsolete]
 		protected AutodiscoverRemoteException(SerializationInfo info, StreamingContext context)
 			: base(info, context)
 		{
@@ -87,9 +89,11 @@ namespace Microsoft.Exchange.WebServices.Autodiscover
 		/// <param name="info">The object that holds the serialized object data. </param>
 		/// <param name="context">The contextual information about the source or destination. </param>
 		/// <exception cref="T:System.ArgumentNullException">The <paramref name="info" /> object is a null reference (Nothing in Visual Basic). </exception>
+		[Obsolete]
 		public override void GetObjectData(SerializationInfo info, StreamingContext context)
 		{
-			EwsUtilities.Assert(info != null, "AutodiscoverRemoteException.GetObjectData", "info is null");
+			// EwsUtilities.Assert(info != null, "AutodiscoverRemoteException.GetObjectData", "info is null");
+			if (info == null) throw new ArgumentNullException(nameof(info));
 
 			base.GetObjectData(info, context);
 
