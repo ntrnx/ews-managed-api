@@ -36,10 +36,10 @@ added cancellation token for most of methods
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="System.DirectoryServices" />
-    <PackageReference Include="System.IO.FileSystem.AccessControl" />
-    <PackageReference Include="System.Net.Http" />
-    <PackageReference Include="System.Security.Cryptography.Xml" />
+    <PackageReference Include="System.DirectoryServices" Version="7.0.1" />
+    <PackageReference Include="System.IO.FileSystem.AccessControl" Version="5.0.0" />
+    <PackageReference Include="System.Net.Http" Version="4.3.4" />
+    <PackageReference Include="System.Security.Cryptography.Xml" Version="7.0.1" />
   </ItemGroup>
 
   <ItemGroup>
