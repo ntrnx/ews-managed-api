@@ -1,8 +1,6 @@
-﻿using System;
 using System.Collections.Generic;
-using System.Text;
 
-namespace Microsoft.Exchange.WebServices
+namespace Microsoft.Exchange.WebServices.Extensions
 {
     public static class DictionaryExtensions
     {

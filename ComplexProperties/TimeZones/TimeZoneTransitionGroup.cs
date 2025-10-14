@@ -23,6 +23,8 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
+using Microsoft.Exchange.WebServices.Extensions;
+
 namespace Microsoft.Exchange.WebServices.Data
 {
     using Misc;
