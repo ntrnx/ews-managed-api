@@ -28,8 +28,11 @@ added cancellation token for most of methods
     </PackageReleaseNotes>
     <Version>2.0.0-beta2</Version>
     <PackageLicenseFile>license.txt</PackageLicenseFile>
+    <NoWarn>$(NoWarn);CA1416;SYSLIB0014;SYSLIB0028</NoWarn>
+    <!--
     <NoWarn>$(NoWarn);CA1416;SYSLIB0014;SYSLIB0028;CS8600;CS8601;CS8602;CS8603;CS8604;CS8618;CS8619;CS8622;CS8625;CS8629;CS8714;CS8765</NoWarn>
     <Nullable>enable</Nullable>
+    -->
   </PropertyGroup>
 
   <ItemGroup>
