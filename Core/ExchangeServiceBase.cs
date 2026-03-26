@@ -34,9 +34,7 @@ namespace Microsoft.Exchange.WebServices.Data
     using System.Net;
     using System.Net.Http;
     using System.Net.Http.Headers;
-#if NETSTANDARD2_0
     using System.Runtime.InteropServices;
-#endif
     using System.Security.Cryptography;
     using System.Xml;
 
@@ -193,11 +191,10 @@ namespace Microsoft.Exchange.WebServices.Data
                         throw new ServiceLocalException(Strings.CredentialsRequired);
                     }
 
-#if NETSTANDARD2_0
-                // Temporary fix for authentication on Linux platform
+                // Fix for authentication on Linux platform — avoid Negotiate/Kerberos
+                // timeout when KDC is unreachable (e.g. in Docker containers)
                 if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
                     serviceCredentials = AdjustLinuxAuthentication(url, serviceCredentials);
-#endif
 
                     // Make sure that credentials have been authenticated if required
                     serviceCredentials.PreAuthenticate();

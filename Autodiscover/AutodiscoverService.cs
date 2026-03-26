@@ -36,9 +36,7 @@ namespace Microsoft.Exchange.WebServices.Autodiscover
     using System.Threading.Tasks;
     using System.Net.Http;
     using System.Net.Http.Headers;
-#if NETSTANDARD2_0
     using System.Runtime.InteropServices;
-#endif
 
     /// <summary>
     /// Defines a delegate that is used by the AutodiscoverService to ask whether a redirectionUrl can be used.
@@ -225,7 +223,7 @@ namespace Microsoft.Exchange.WebServices.Autodiscover
                 request.Content.Headers.ContentType = new MediaTypeHeaderValue("text/xml") { CharSet = "utf-8" };
             }
 
-            using (var client = this.PrepareHttpClient())
+            using (var client = this.PrepareHttpClient(url))
             using (IEwsHttpWebResponse webResponse = new EwsHttpWebResponse(client.SendAsync(request).Result))
             {
                 Uri redirectUrl;
@@ -1517,7 +1515,7 @@ namespace Microsoft.Exchange.WebServices.Autodiscover
             return request;
         }
 
-        internal HttpClient PrepareHttpClient()
+        internal HttpClient PrepareHttpClient(Uri requestUrl = null)
         {
             var httpClientHandler = new HttpClientHandler()
             {
@@ -1541,19 +1539,29 @@ namespace Microsoft.Exchange.WebServices.Autodiscover
                     throw new ServiceLocalException(Strings.CredentialsRequired);
                 }
 
-#if NETSTANDARD2_0
-                // Temporary fix for authentication on Linux platform
-                if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-                    serviceCredentials = AdjustLinuxAuthentication(url, serviceCredentials);
-#endif
-
                 // Make sure that credentials have been authenticated if required
                 serviceCredentials.PreAuthenticate();
 
                 // TODO support different credentials
                 if (!(serviceCredentials is WebCredentials))
                     throw new NotImplementedException();
-                httpClientHandler.Credentials = (this.Credentials as WebCredentials)?.Credentials;
+
+                var networkCredentials = (serviceCredentials as WebCredentials)?.Credentials as NetworkCredential;
+
+                // Fix for authentication on Linux platform — avoid Negotiate/Kerberos
+                // timeout when KDC is unreachable (e.g. in Docker containers)
+                if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows) && networkCredentials != null && requestUrl != null)
+                {
+                    var credentialCache = new CredentialCache();
+                    credentialCache.Add(requestUrl, "NTLM", networkCredentials);
+                    credentialCache.Add(requestUrl, "Digest", networkCredentials);
+                    credentialCache.Add(requestUrl, "Basic", networkCredentials);
+                    httpClientHandler.Credentials = credentialCache;
+                }
+                else
+                {
+                    httpClientHandler.Credentials = (serviceCredentials as WebCredentials)?.Credentials;
+                }
 
                 // Apply credentials to the request
                 // serviceCredentials.PrepareWebRequest(request);
