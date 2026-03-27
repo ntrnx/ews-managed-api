@@ -230,6 +230,8 @@ namespace Microsoft.Exchange.WebServices.Data
                 credentialCache.Add(url, "NTLM", networkCredentials);
                 credentialCache.Add(url, "Digest", networkCredentials);
                 credentialCache.Add(url, "Basic", networkCredentials);
+                if (!string.IsNullOrEmpty(networkCredentials.Domain))
+                    credentialCache.Add(url, "Negotiate", networkCredentials);
 
                 serviceCredentials = credentialCache;
             }

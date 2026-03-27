@@ -1556,6 +1556,8 @@ namespace Microsoft.Exchange.WebServices.Autodiscover
                     credentialCache.Add(requestUrl, "NTLM", networkCredentials);
                     credentialCache.Add(requestUrl, "Digest", networkCredentials);
                     credentialCache.Add(requestUrl, "Basic", networkCredentials);
+                    if (!string.IsNullOrEmpty(networkCredentials.Domain))
+                        credentialCache.Add(requestUrl, "Negotiate", networkCredentials);
                     httpClientHandler.Credentials = credentialCache;
                 }
                 else
