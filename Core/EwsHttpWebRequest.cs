@@ -42,16 +42,40 @@ namespace Microsoft.Exchange.WebServices.Data
     internal class EwsHttpWebRequest : IEwsHttpWebRequest
     {
         /// <summary>
-        /// Underlying HttpWebRequest.
+        /// Underlying HttpClient.
         /// </summary>
         readonly HttpClient _httpClient;
         readonly HttpClientHandler _httpClientHandler;
         private bool checkCertificates;
 
         /// <summary>
+        /// Whether this instance owns the HttpClient (legacy per-request mode)
+        /// or uses a shared one from ExchangeServiceBase.
+        /// </summary>
+        private readonly bool _ownsHttpClient;
+
+        /// <summary>
+        /// Per-request message used as a header container in shared-client mode.
+        /// Its Headers property provides an isolated HttpRequestHeaders instance.
+        /// </summary>
+        private readonly HttpRequestMessage _pendingMessage;
+
+        /// <summary>
+        /// Per-request timeout in milliseconds (shared-client mode).
+        /// </summary>
+        private int _timeout = 100_000;
+
+        /// <summary>
+        /// Per-request cancellation for Abort() in shared-client mode.
+        /// </summary>
+        private readonly CancellationTokenSource _abortCts = new CancellationTokenSource();
+
+        /// <summary>
         /// Initializes a new instance of the <see cref="EwsHttpWebRequest"/> class.
+        /// Legacy constructor: creates its own HttpClientHandler + HttpClient.
         /// </summary>
         /// <param name="uri">The URI.</param>
+        /// <param name="checkCertificates">Whether to validate server certificates.</param>
         internal EwsHttpWebRequest(Uri uri, bool checkCertificates)
         {
             Method = "GET";
@@ -63,6 +87,25 @@ namespace Microsoft.Exchange.WebServices.Data
             _httpClientHandler.ServerCertificateCustomValidationCallback += RemoteCertificateValidation;
             _httpClient = new HttpClient(_httpClientHandler);
             this.checkCertificates = checkCertificates;
+            _ownsHttpClient = true;
+            _pendingMessage = null;
+        }
+
+        /// <summary>
+        /// Initializes a new instance of the <see cref="EwsHttpWebRequest"/> class
+        /// using a shared HttpClient. Handler-level properties (Credentials, PreAuthenticate,
+        /// CookieContainer, etc.) are already configured on the shared handler.
+        /// </summary>
+        /// <param name="uri">The URI.</param>
+        /// <param name="sharedHttpClient">A shared HttpClient owned by ExchangeServiceBase.</param>
+        internal EwsHttpWebRequest(Uri uri, HttpClient sharedHttpClient)
+        {
+            Method = "GET";
+            RequestUri = uri;
+            _httpClient = sharedHttpClient;
+            _httpClientHandler = null;
+            _ownsHttpClient = false;
+            _pendingMessage = new HttpRequestMessage();
         }
 
         private bool RemoteCertificateValidation(HttpRequestMessage sender, X509Certificate2 certificate, X509Chain chain, SslPolicyErrors sslPolicyErrors)
@@ -71,10 +114,6 @@ namespace Microsoft.Exchange.WebServices.Data
             {
                 return true;
             }
-            /*
-            Console.WriteLine("RemoteCertificateValidation: Certificate: {0}", certificate.ToString());
-            Console.WriteLine("RemoteCertificateValidation: Errors: {0}", sslPolicyErrors.ToString());
-            */
             // If the certificate is a valid, signed certificate, return true.
             if (sslPolicyErrors == System.Net.Security.SslPolicyErrors.None)
             {
@@ -126,7 +165,10 @@ namespace Microsoft.Exchange.WebServices.Data
         /// </summary>
         public void Abort()
         {
-            _httpClient.CancelPendingRequests();
+            if (_ownsHttpClient)
+                _httpClient.CancelPendingRequests();
+            else
+                _abortCts.Cancel();
         }
 
         /// <summary>
@@ -145,46 +187,76 @@ namespace Microsoft.Exchange.WebServices.Data
         /// </returns>
         public async Task<IEwsHttpWebResponse> GetResponse(CancellationToken token)
         {
-            var message = new HttpRequestMessage(new HttpMethod(Method), RequestUri);
-            message.Content = new StringContent(Content);
-            message.Content.Headers.Clear();
-            if (!string.IsNullOrEmpty(ContentType))
+            HttpResponseMessage response;
+
+            if (_ownsHttpClient)
             {
-                message.Content.Headers.ContentType = null;
-                message.Content.Headers.TryAddWithoutValidation("Content-Type", ContentType);
-            } else
-            {
-                message.Content.Headers.Add("Content-Type", "text/xml; charset=utf-8");
+                // Legacy path — per-request HttpClient, current behavior unchanged
+                var message = new HttpRequestMessage(new HttpMethod(Method), RequestUri);
+                message.Content = new StringContent(Content);
+                message.Content.Headers.Clear();
+                if (!string.IsNullOrEmpty(ContentType))
+                {
+                    message.Content.Headers.ContentType = null;
+                    message.Content.Headers.TryAddWithoutValidation("Content-Type", ContentType);
+                }
+                else
+                {
+                    message.Content.Headers.Add("Content-Type", "text/xml; charset=utf-8");
+                }
+
+                if (!string.IsNullOrEmpty(UserAgent))
+                {
+                    message.Headers.UserAgent.Clear();
+                    message.Headers.UserAgent.ParseAdd(UserAgent);
+                }
+
+                if (!string.IsNullOrEmpty(Accept))
+                {
+                    message.Headers.Accept.Clear();
+                    message.Headers.Accept.ParseAdd(Accept);
+                }
+
+                response = await _httpClient.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, token);
             }
-
-            if (!string.IsNullOrEmpty(UserAgent))
+            else
             {
-                message.Headers.UserAgent.Clear();
-                message.Headers.UserAgent.ParseAdd(UserAgent);
+                // Shared-client path — reuse _pendingMessage which already has per-request headers
+                _pendingMessage.Method = new HttpMethod(Method);
+                _pendingMessage.RequestUri = RequestUri;
+                _pendingMessage.Content = new StringContent(Content);
+                _pendingMessage.Content.Headers.Clear();
+                if (!string.IsNullOrEmpty(ContentType))
+                {
+                    _pendingMessage.Content.Headers.ContentType = null;
+                    _pendingMessage.Content.Headers.TryAddWithoutValidation("Content-Type", ContentType);
+                }
+                else
+                {
+                    _pendingMessage.Content.Headers.Add("Content-Type", "text/xml; charset=utf-8");
+                }
+
+                if (!string.IsNullOrEmpty(UserAgent))
+                {
+                    _pendingMessage.Headers.UserAgent.Clear();
+                    _pendingMessage.Headers.UserAgent.ParseAdd(UserAgent);
+                }
+
+                if (!string.IsNullOrEmpty(Accept))
+                {
+                    _pendingMessage.Headers.Accept.Clear();
+                    _pendingMessage.Headers.Accept.ParseAdd(Accept);
+                }
+
+                _pendingMessage.Headers.ConnectionClose = !KeepAlive;
+
+                // Per-request timeout via CancellationToken (shared HttpClient.Timeout is Infinite)
+                using var timeoutCts = CancellationTokenSource.CreateLinkedTokenSource(token, _abortCts.Token);
+                if (_timeout > 0)
+                    timeoutCts.CancelAfter(_timeout);
+
+                response = await _httpClient.SendAsync(_pendingMessage, HttpCompletionOption.ResponseHeadersRead, timeoutCts.Token);
             }
-
-            if (!string.IsNullOrEmpty(Accept))
-            {
-                message.Headers.Accept.Clear();
-                message.Headers.Accept.ParseAdd(Accept);
-            }
-
-            HttpResponseMessage response = null;
-
-            response = await _httpClient.SendAsync(message, HttpCompletionOption.ResponseHeadersRead, token);
-
-
-			/* hide converting httpClient.SendAsync exception to EwsHttpClientException
-			   to get exact httpClient response
-
-			try
-            {
-            }
-            catch (Exception exception)
-            {
-                throw new EwsHttpClientException(exception);
-            }
-            */
 
             if (!response.IsSuccessStatusCode)
                 throw new EwsHttpClientException(response);
@@ -194,7 +266,10 @@ namespace Microsoft.Exchange.WebServices.Data
 
         public void Dispose()
         {
-            _httpClient.Dispose();
+            if (_ownsHttpClient)
+                _httpClient.Dispose();
+
+            _pendingMessage?.Dispose();
         }
 
         /// <summary>
@@ -216,8 +291,18 @@ namespace Microsoft.Exchange.WebServices.Data
         /// </returns>
         bool IEwsHttpWebRequest.AllowAutoRedirect
         {
-            get { return _httpClientHandler.AllowAutoRedirect; }
-            set { _httpClientHandler.AllowAutoRedirect = value; }
+            get
+            {
+                if (!_ownsHttpClient)
+                    throw new InvalidOperationException("Cannot read handler properties on shared transport.");
+                return _httpClientHandler.AllowAutoRedirect;
+            }
+            set
+            {
+                if (!_ownsHttpClient)
+                    throw new InvalidOperationException("Cannot mutate handler properties on shared transport.");
+                _httpClientHandler.AllowAutoRedirect = value;
+            }
         }
 
         /// <summary>
@@ -247,8 +332,18 @@ namespace Microsoft.Exchange.WebServices.Data
         /// <value>The cookie container.</value>
         public CookieContainer CookieContainer
         {
-            get { return this._httpClientHandler.CookieContainer; }
-            set { this._httpClientHandler.CookieContainer = value; }
+            get
+            {
+                if (!_ownsHttpClient)
+                    throw new InvalidOperationException("Cannot read handler properties on shared transport.");
+                return this._httpClientHandler.CookieContainer;
+            }
+            set
+            {
+                if (!_ownsHttpClient)
+                    throw new InvalidOperationException("Cannot mutate handler properties on shared transport.");
+                this._httpClientHandler.CookieContainer = value;
+            }
         }
 
         /// <summary>
@@ -257,8 +352,21 @@ namespace Microsoft.Exchange.WebServices.Data
         /// <returns>An <see cref="T:System.Net.ICredentials"/> that contains the authentication credentials associated with the request. The default is null.</returns>
         public ICredentials Credentials
         {
-            get { return this._httpClientHandler.Credentials; }
-            set { this._httpClientHandler.Credentials = value; }
+            get
+            {
+                if (!_ownsHttpClient)
+                    return null; // Credentials are on the shared handler, not accessible here
+                return this._httpClientHandler.Credentials;
+            }
+            set
+            {
+                // In shared mode, credentials are already applied to the shared handler
+                // during EnsureSharedHttpClient. PrepareWebRequest may re-set the same
+                // value per-request — this is harmless and expected.
+                if (!_ownsHttpClient)
+                    return;
+                this._httpClientHandler.Credentials = value;
+            }
         }
 
         /// <summary>
@@ -267,7 +375,12 @@ namespace Microsoft.Exchange.WebServices.Data
         /// <returns>A <see cref="T:System.Net.WebHeaderCollection"/> that contains the name/value pairs that make up the headers for the HTTP request.</returns>
         HttpRequestHeaders IEwsHttpWebRequest.Headers
         {
-            get { return this._httpClient.DefaultRequestHeaders; }
+            get
+            {
+                return _ownsHttpClient
+                    ? _httpClient.DefaultRequestHeaders
+                    : _pendingMessage.Headers;
+            }
         }
 
         /// <summary>
@@ -286,8 +399,18 @@ namespace Microsoft.Exchange.WebServices.Data
         /// </summary>
         public IWebProxy Proxy
         {
-            get { return _httpClientHandler.Proxy; }
-            set { _httpClientHandler.Proxy = value; }
+            get
+            {
+                if (!_ownsHttpClient)
+                    throw new InvalidOperationException("Cannot read handler properties on shared transport.");
+                return _httpClientHandler.Proxy;
+            }
+            set
+            {
+                if (!_ownsHttpClient)
+                    throw new InvalidOperationException("Cannot mutate handler properties on shared transport.");
+                _httpClientHandler.Proxy = value;
+            }
         }
 
         /// <summary>
@@ -296,8 +419,18 @@ namespace Microsoft.Exchange.WebServices.Data
         /// <returns>true to send a WWW-authenticate HTTP header with requests after authentication has taken place; otherwise, false. The default is false.</returns>
         public bool PreAuthenticate
         {
-            get { return _httpClientHandler.PreAuthenticate; }
-            set { _httpClientHandler.PreAuthenticate = value; }
+            get
+            {
+                if (!_ownsHttpClient)
+                    throw new InvalidOperationException("Cannot read handler properties on shared transport.");
+                return _httpClientHandler.PreAuthenticate;
+            }
+            set
+            {
+                if (!_ownsHttpClient)
+                    throw new InvalidOperationException("Cannot mutate handler properties on shared transport.");
+                _httpClientHandler.PreAuthenticate = value;
+            }
         }
 
         /// <summary>
@@ -315,8 +448,19 @@ namespace Microsoft.Exchange.WebServices.Data
         /// <returns>The number of milliseconds to wait before the request times out. The default is 100,000 milliseconds (100 seconds).</returns>
         public int Timeout
         {
-            get { return _httpClient.Timeout.Milliseconds; }
-            set { _httpClient.Timeout = TimeSpan.FromMilliseconds(value); }
+            get
+            {
+                return _ownsHttpClient
+                    ? (int)_httpClient.Timeout.TotalMilliseconds
+                    : _timeout;
+            }
+            set
+            {
+                if (_ownsHttpClient)
+                    _httpClient.Timeout = TimeSpan.FromMilliseconds(value);
+                else
+                    _timeout = value;
+            }
         }
 
         /// <summary>
@@ -325,8 +469,18 @@ namespace Microsoft.Exchange.WebServices.Data
         /// <returns>true if the default credentials are used; otherwise false. The default value is false.</returns>
         public bool UseDefaultCredentials
         {
-            get { return this._httpClientHandler.UseDefaultCredentials; }
-            set { this._httpClientHandler.UseDefaultCredentials = value; }
+            get
+            {
+                if (!_ownsHttpClient)
+                    throw new InvalidOperationException("Cannot read handler properties on shared transport.");
+                return this._httpClientHandler.UseDefaultCredentials;
+            }
+            set
+            {
+                if (!_ownsHttpClient)
+                    throw new InvalidOperationException("Cannot mutate handler properties on shared transport.");
+                this._httpClientHandler.UseDefaultCredentials = value;
+            }
         }
 
         /// <summary>
@@ -344,9 +498,9 @@ namespace Microsoft.Exchange.WebServices.Data
         /// </summary>
         public bool KeepAlive
         {
-            get { return !(this._httpClient.DefaultRequestHeaders.ConnectionClose ?? false); }
-            set { this._httpClient.DefaultRequestHeaders.ConnectionClose = !value; }
-        }
+            get;
+            set;
+        } = true;
 
         /// <summary>
         /// Gets or sets the name of the connection group for the request.

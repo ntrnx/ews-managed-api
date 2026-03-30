@@ -27,6 +27,7 @@ namespace Microsoft.Exchange.WebServices.Data
 {
     using System;
     using System.Net;
+    using System.Net.Http;
 
     /// <summary>
     /// Defines a factory interface for creating IEwsHttpWebRequest and IEwsHttpWebResponse instances.
@@ -42,6 +43,17 @@ namespace Microsoft.Exchange.WebServices.Data
         /// An object that implements the <see cref="IEwsHttpWebRequest"/> interface.
         /// </returns>
         IEwsHttpWebRequest CreateRequest(Uri uri, bool checkCertificates);
+
+        /// <summary>
+        /// Create a new instance of class that implements the <see cref="IEwsHttpWebRequest"/> interface
+        /// using a shared HttpClient (transport is not owned by the request).
+        /// </summary>
+        /// <param name="uri">The URI.</param>
+        /// <param name="sharedHttpClient">A shared HttpClient instance owned by ExchangeServiceBase.</param>
+        /// <returns>
+        /// An object that implements the <see cref="IEwsHttpWebRequest"/> interface.
+        /// </returns>
+        IEwsHttpWebRequest CreateRequest(Uri uri, HttpClient sharedHttpClient);
 
         /// <summary>
         /// Creates the exception response.

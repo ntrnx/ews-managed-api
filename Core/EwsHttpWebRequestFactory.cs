@@ -47,6 +47,17 @@ namespace Microsoft.Exchange.WebServices.Data
         }
 
         /// <summary>
+        /// Create a new instance of <see cref="EwsHttpWebRequest"/> using a shared HttpClient.
+        /// </summary>
+        /// <param name="uri">The service URI.</param>
+        /// <param name="sharedHttpClient">A shared HttpClient instance.</param>
+        /// <returns>An instance of <see cref="IEwsHttpWebRequest"/>.</returns>
+        IEwsHttpWebRequest IEwsHttpWebRequestFactory.CreateRequest(Uri uri, HttpClient sharedHttpClient)
+        {
+            return new EwsHttpWebRequest(uri, sharedHttpClient);
+        }
+
+        /// <summary>
         /// Creates response from a EwsHttpClientException.
         /// </summary>
         /// <param name="exception">The exception.</param>

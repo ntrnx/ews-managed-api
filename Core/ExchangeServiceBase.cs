@@ -34,8 +34,10 @@ namespace Microsoft.Exchange.WebServices.Data
     using System.Net;
     using System.Net.Http;
     using System.Net.Http.Headers;
+    using System.Net.Security;
     using System.Runtime.InteropServices;
     using System.Security.Cryptography;
+    using System.Security.Cryptography.X509Certificates;
     using System.Xml;
 
     /// <summary>
@@ -98,6 +100,21 @@ namespace Microsoft.Exchange.WebServices.Data
         private IDictionary<string, string> httpResponseHeaders = new Dictionary<string, string>();
         private IEwsHttpWebRequestFactory ewsHttpWebRequestFactory = new EwsHttpWebRequestFactory();
         private bool checkCertificates = true;
+
+        /// <summary>
+        /// Shared HttpClient/HttpClientHandler reused across SOAP calls within this service instance.
+        /// Initialized lazily on first PrepareHttpWebRequestForUrl call; invalidated on credential change.
+        /// </summary>
+        private HttpClientHandler _sharedHttpClientHandler;
+        private HttpClient _sharedHttpClient;
+
+        // Snapshot of settings used to build the shared handler, for staleness detection
+        private bool _snapshotCheckCerts;
+        private bool _snapshotPreAuth;
+        private bool _snapshotUseDefaultCreds;
+        private IWebProxy _snapshotProxy;
+        private CookieContainer _snapshotCookieContainer;
+        private Uri _snapshotUrl;
         #endregion
 
         #region Event handlers
@@ -144,17 +161,21 @@ namespace Microsoft.Exchange.WebServices.Data
                 throw new ServiceLocalException(string.Format(Strings.UnsupportedWebProtocol, url.Scheme));
             }
 
-            IEwsHttpWebRequest request = this.HttpWebRequestFactory.CreateRequest(url, checkCertificates);
+            // Ensure shared transport is initialized with handler-level config.
+            // Handler properties (Credentials, PreAuthenticate, CookieContainer, Proxy,
+            // AllowAutoRedirect, UseDefaultCredentials) are set once here and become
+            // immutable after the first SendAsync call (.NET 8 SocketsHttpHandler constraint).
+            // If any transport setting has changed since creation, the handler is rebuilt.
+            EnsureSharedHttpClient(url, checkCertificates, allowAutoRedirect);
+
+            // Create lightweight request wrapper — no handler-level mutations
+            IEwsHttpWebRequest request = this.HttpWebRequestFactory.CreateRequest(url, _sharedHttpClient);
             try
             {
-
-                request.PreAuthenticate = this.PreAuthenticate;
                 request.Timeout = this.Timeout;
                 this.SetContentType(request);
                 request.Method = "POST";
                 request.UserAgent = this.UserAgent;
-                request.AllowAutoRedirect = allowAutoRedirect;
-                request.CookieContainer = this.CookieContainer;
                 request.KeepAlive = this.keepAlive;
                 request.ConnectionGroupName = this.connectionGroupName;
 
@@ -172,18 +193,18 @@ namespace Microsoft.Exchange.WebServices.Data
                     }
                 }
 
-                if (this.webProxy != null)
-                {
-                    request.Proxy = this.webProxy;
-                }
-
                 if (this.HttpHeaders.Count > 0)
                 {
                     this.HttpHeaders.ForEach((kv) => request.Headers.TryAddWithoutValidation(kv.Key, kv.Value));
                 }
 
-                request.UseDefaultCredentials = this.UseDefaultCredentials;
-                if (!request.UseDefaultCredentials)
+                // Per-request credential handling: call PrepareWebRequest for all credential
+                // types so they can inject per-request state (OAuth Authorization header,
+                // EwsUrl for token types, etc.).  Handler-level properties (Credentials,
+                // ClientCertificates) were already applied to the shared handler in
+                // EnsureSharedHttpClient; the shared-mode request's Credentials setter
+                // is a no-op, so redundant re-sets are harmless.
+                if (!this.UseDefaultCredentials)
                 {
                     ExchangeCredentials serviceCredentials = this.Credentials;
                     if (serviceCredentials == null)
@@ -191,15 +212,7 @@ namespace Microsoft.Exchange.WebServices.Data
                         throw new ServiceLocalException(Strings.CredentialsRequired);
                     }
 
-                // Fix for authentication on Linux platform — avoid Negotiate/Kerberos
-                // timeout when KDC is unreachable (e.g. in Docker containers)
-                if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-                    serviceCredentials = AdjustLinuxAuthentication(url, serviceCredentials);
-
-                    // Make sure that credentials have been authenticated if required
                     serviceCredentials.PreAuthenticate();
-
-                    // Apply credentials to the request
                     serviceCredentials.PrepareWebRequest(request);
                 }
 
@@ -215,6 +228,132 @@ namespace Microsoft.Exchange.WebServices.Data
                 request.Dispose();
                 throw;
             }
+        }
+
+        /// <summary>
+        /// Lazily initializes the shared HttpClientHandler + HttpClient with all handler-level
+        /// properties (Credentials, PreAuthenticate, CookieContainer, Proxy, etc.).
+        /// Once created, the handler is reused for all subsequent SOAP calls, enabling
+        /// auth token caching and TCP connection pooling.
+        /// If mutable transport settings (Proxy, PreAuthenticate, CookieContainer, etc.)
+        /// have changed since the handler was created, it is rebuilt.
+        /// </summary>
+        private void EnsureSharedHttpClient(Uri url, bool checkCerts, bool allowAutoRedirect)
+        {
+            // Detect if transport settings changed since the handler was created.
+            // URL is included because AdjustLinuxAuthentication builds a CredentialCache
+            // scoped to the specific URI.
+            if (_sharedHttpClient != null)
+            {
+                if (_snapshotCheckCerts != checkCerts
+                    || _snapshotPreAuth != this.preAuthenticate
+                    || _snapshotUseDefaultCreds != this.useDefaultCredentials
+                    || !ReferenceEquals(_snapshotProxy, this.webProxy)
+                    || !ReferenceEquals(_snapshotCookieContainer, this.cookieContainer)
+                    || _snapshotUrl != url)
+                {
+                    InvalidateSharedHttpClient();
+                }
+                else
+                {
+                    return;
+                }
+            }
+
+            var handler = new HttpClientHandler
+            {
+                AutomaticDecompression = DecompressionMethods.Deflate | DecompressionMethods.GZip,
+                CookieContainer = this.cookieContainer,
+                PreAuthenticate = this.preAuthenticate,
+                AllowAutoRedirect = allowAutoRedirect,
+                UseDefaultCredentials = this.useDefaultCredentials,
+            };
+
+            // Certificate validation
+            handler.ServerCertificateCustomValidationCallback = (sender, certificate, chain, sslPolicyErrors) =>
+            {
+                if (!checkCerts)
+                    return true;
+                if (sslPolicyErrors == SslPolicyErrors.None)
+                    return true;
+                if (sslPolicyErrors == SslPolicyErrors.RemoteCertificateChainErrors
+                    && chain != null && chain.ChainStatus != null)
+                {
+                    foreach (var status in chain.ChainStatus)
+                    {
+                        if (certificate.Subject == certificate.Issuer
+                            && status.Status == X509ChainStatusFlags.UntrustedRoot)
+                            continue;
+                        if (status.Status != X509ChainStatusFlags.NoError)
+                            return false;
+                    }
+                    return true;
+                }
+                return false;
+            };
+
+            // Proxy
+            if (this.webProxy != null)
+                handler.Proxy = this.webProxy;
+
+            // Credentials — apply handler-level settings (ICredentials, client certs)
+            // before the first SendAsync, which freezes the SocketsHttpHandler on .NET 8.
+            // Use a temporary legacy request to generically capture what any credential
+            // type wants to set on the handler, then transfer to the shared handler.
+            if (!this.useDefaultCredentials)
+            {
+                ExchangeCredentials serviceCredentials = this.Credentials;
+                if (serviceCredentials == null)
+                    throw new ServiceLocalException(Strings.CredentialsRequired);
+
+                // Fix for authentication on Linux platform — avoid Negotiate/Kerberos
+                // timeout when KDC is unreachable (e.g. in Docker containers)
+                if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+                    serviceCredentials = AdjustLinuxAuthentication(url, serviceCredentials);
+
+                serviceCredentials.PreAuthenticate();
+
+                // Capture handler-level settings from PrepareWebRequest via a temp request
+                using (var captureRequest = new EwsHttpWebRequest(url, !checkCerts))
+                {
+                    serviceCredentials.PrepareWebRequest(captureRequest);
+
+                    if (captureRequest.Credentials != null)
+                        handler.Credentials = captureRequest.Credentials;
+
+                    if (captureRequest.ClientCertificates != null)
+                    {
+                        foreach (var cert in captureRequest.ClientCertificates)
+                            handler.ClientCertificates.Add(cert);
+                    }
+                }
+            }
+
+            _sharedHttpClientHandler = handler;
+            _sharedHttpClient = new HttpClient(handler, disposeHandler: false)
+            {
+                Timeout = System.Threading.Timeout.InfiniteTimeSpan
+            };
+
+            // Snapshot settings for staleness detection
+            _snapshotCheckCerts = checkCerts;
+            _snapshotPreAuth = this.preAuthenticate;
+            _snapshotUseDefaultCreds = this.useDefaultCredentials;
+            _snapshotProxy = this.webProxy;
+            _snapshotCookieContainer = this.cookieContainer;
+            _snapshotUrl = url;
+        }
+
+        /// <summary>
+        /// Disposes and resets the shared HttpClient/HttpClientHandler,
+        /// forcing re-creation on next PrepareHttpWebRequestForUrl call.
+        /// </summary>
+        private void InvalidateSharedHttpClient()
+        {
+            _sharedHttpClient?.Dispose();
+            _sharedHttpClient = null;
+            _sharedHttpClientHandler?.Dispose();
+            _sharedHttpClientHandler = null;
         }
 
         internal ExchangeCredentials AdjustLinuxAuthentication(Uri url, ExchangeCredentials serviceCredentials)
@@ -746,6 +885,7 @@ namespace Microsoft.Exchange.WebServices.Data
                 this.credentials = value;
                 this.useDefaultCredentials = false;
                 this.cookieContainer = new CookieContainer();       // Changing credentials resets the Cookie container
+                InvalidateSharedHttpClient();
             }
         }
 
@@ -769,6 +909,7 @@ namespace Microsoft.Exchange.WebServices.Data
                 {
                     this.credentials = null;
                     this.cookieContainer = new CookieContainer();   // Changing credentials resets the Cookie container
+                    InvalidateSharedHttpClient();
                 }
             }
         }
