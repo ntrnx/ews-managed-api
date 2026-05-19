@@ -108,6 +108,7 @@ namespace Microsoft.Exchange.WebServices.Data
         /// </summary>
         private SocketsHttpHandler _sharedHttpClientHandler;
         private HttpClient _sharedHttpClient;
+        private TimeSpan _pooledConnectionLifetime = TimeSpan.FromHours(1);
 
         // Snapshot of settings used to build the shared handler, for staleness detection
         private bool _snapshotCheckCerts;
@@ -116,6 +117,7 @@ namespace Microsoft.Exchange.WebServices.Data
         private IWebProxy _snapshotProxy;
         private CookieContainer _snapshotCookieContainer;
         private Uri _snapshotUrl;
+        private TimeSpan _snapshotPooledConnectionLifetime;
         #endregion
 
         #region Event handlers
@@ -251,7 +253,8 @@ namespace Microsoft.Exchange.WebServices.Data
                     || _snapshotUseDefaultCreds != this.useDefaultCredentials
                     || !ReferenceEquals(_snapshotProxy, this.webProxy)
                     || !ReferenceEquals(_snapshotCookieContainer, this.cookieContainer)
-                    || _snapshotUrl != url)
+                    || _snapshotUrl != url
+                    || _snapshotPooledConnectionLifetime != _pooledConnectionLifetime)
                 {
                     InvalidateSharedHttpClient();
                 }
@@ -267,10 +270,8 @@ namespace Microsoft.Exchange.WebServices.Data
                 CookieContainer = this.cookieContainer,
                 PreAuthenticate = this.preAuthenticate,
                 AllowAutoRedirect = allowAutoRedirect,
-                // Connections are retired after 15 min, preventing NTLM sessions from going stale
-                // on long-lived processes even without an explicit reset.
-                PooledConnectionLifetime = TimeSpan.FromMinutes(15),
-                PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2),
+                PooledConnectionLifetime = _pooledConnectionLifetime,
+                PooledConnectionIdleTimeout = System.Threading.Timeout.InfiniteTimeSpan,
             };
 
             // Certificate validation
@@ -352,6 +353,7 @@ namespace Microsoft.Exchange.WebServices.Data
             _snapshotProxy = this.webProxy;
             _snapshotCookieContainer = this.cookieContainer;
             _snapshotUrl = url;
+            _snapshotPooledConnectionLifetime = _pooledConnectionLifetime;
         }
 
         /// <summary>
@@ -1034,7 +1036,18 @@ namespace Microsoft.Exchange.WebServices.Data
         }
 
         /// <summary>
-        /// Gets or sets the name of the connection group for the request. 
+        /// How long a pooled TCP connection can be reused before it is retired.
+        /// Retiring connections periodically prevents NTLM sessions from going stale.
+        /// Default: 1 hour. Changing this value triggers handler rebuild on next request.
+        /// </summary>
+        public TimeSpan PooledConnectionLifetime
+        {
+            get { return _pooledConnectionLifetime; }
+            set { _pooledConnectionLifetime = value; }
+        }
+
+        /// <summary>
+        /// Gets or sets the name of the connection group for the request.
         /// </summary>
         public string ConnectionGroupName
         {
