@@ -43,7 +43,7 @@ namespace Microsoft.Exchange.WebServices.Data
     /// <summary>
     /// Represents an abstract binding to an Exchange Service.
     /// </summary>
-    public abstract class ExchangeServiceBase
+    public abstract class ExchangeServiceBase : IDisposable
     {
         #region Const members
         private static readonly object lockObj = new object();
@@ -102,10 +102,11 @@ namespace Microsoft.Exchange.WebServices.Data
         private bool checkCertificates = true;
 
         /// <summary>
-        /// Shared HttpClient/HttpClientHandler reused across SOAP calls within this service instance.
+        /// Shared HttpClient/SocketsHttpHandler reused across SOAP calls within this service instance.
         /// Initialized lazily on first PrepareHttpWebRequestForUrl call; invalidated on credential change.
+        /// PooledConnectionLifetime limits how long connections live, preventing stale NTLM sessions.
         /// </summary>
-        private HttpClientHandler _sharedHttpClientHandler;
+        private SocketsHttpHandler _sharedHttpClientHandler;
         private HttpClient _sharedHttpClient;
 
         // Snapshot of settings used to build the shared handler, for staleness detection
@@ -260,17 +261,20 @@ namespace Microsoft.Exchange.WebServices.Data
                 }
             }
 
-            var handler = new HttpClientHandler
+            var handler = new SocketsHttpHandler
             {
                 AutomaticDecompression = DecompressionMethods.Deflate | DecompressionMethods.GZip,
                 CookieContainer = this.cookieContainer,
                 PreAuthenticate = this.preAuthenticate,
                 AllowAutoRedirect = allowAutoRedirect,
-                UseDefaultCredentials = this.useDefaultCredentials,
+                // Connections are retired after 15 min, preventing NTLM sessions from going stale
+                // on long-lived processes even without an explicit reset.
+                PooledConnectionLifetime = TimeSpan.FromMinutes(15),
+                PooledConnectionIdleTimeout = TimeSpan.FromMinutes(2),
             };
 
             // Certificate validation
-            handler.ServerCertificateCustomValidationCallback = (sender, certificate, chain, sslPolicyErrors) =>
+            handler.SslOptions.RemoteCertificateValidationCallback = (sender, certificate, chain, sslPolicyErrors) =>
             {
                 if (!checkCerts)
                     return true;
@@ -281,7 +285,7 @@ namespace Microsoft.Exchange.WebServices.Data
                 {
                     foreach (var status in chain.ChainStatus)
                     {
-                        if (certificate.Subject == certificate.Issuer
+                        if (certificate?.Subject == certificate?.Issuer
                             && status.Status == X509ChainStatusFlags.UntrustedRoot)
                             continue;
                         if (status.Status != X509ChainStatusFlags.NoError)
@@ -294,13 +298,18 @@ namespace Microsoft.Exchange.WebServices.Data
 
             // Proxy
             if (this.webProxy != null)
+            {
+                handler.UseProxy = true;
                 handler.Proxy = this.webProxy;
+            }
 
             // Credentials — apply handler-level settings (ICredentials, client certs)
-            // before the first SendAsync, which freezes the SocketsHttpHandler on .NET 8.
-            // Use a temporary legacy request to generically capture what any credential
-            // type wants to set on the handler, then transfer to the shared handler.
-            if (!this.useDefaultCredentials)
+            // before the first SendAsync, which freezes SocketsHttpHandler on .NET 8.
+            if (this.useDefaultCredentials)
+            {
+                handler.Credentials = CredentialCache.DefaultNetworkCredentials;
+            }
+            else
             {
                 ExchangeCredentials serviceCredentials = this.Credentials;
                 if (serviceCredentials == null)
@@ -321,10 +330,11 @@ namespace Microsoft.Exchange.WebServices.Data
                     if (captureRequest.Credentials != null)
                         handler.Credentials = captureRequest.Credentials;
 
-                    if (captureRequest.ClientCertificates != null)
+                    if (captureRequest.ClientCertificates != null && captureRequest.ClientCertificates.Count > 0)
                     {
+                        handler.SslOptions.ClientCertificates ??= new X509CertificateCollection();
                         foreach (var cert in captureRequest.ClientCertificates)
-                            handler.ClientCertificates.Add(cert);
+                            handler.SslOptions.ClientCertificates.Add(cert);
                     }
                 }
             }
@@ -345,8 +355,9 @@ namespace Microsoft.Exchange.WebServices.Data
         }
 
         /// <summary>
-        /// Disposes and resets the shared HttpClient/HttpClientHandler,
+        /// Disposes and resets the shared HttpClient/SocketsHttpHandler,
         /// forcing re-creation on next PrepareHttpWebRequestForUrl call.
+        /// Closes all pooled TCP connections and releases NTLM session state.
         /// </summary>
         private void InvalidateSharedHttpClient()
         {
@@ -355,6 +366,15 @@ namespace Microsoft.Exchange.WebServices.Data
             _sharedHttpClientHandler?.Dispose();
             _sharedHttpClientHandler = null;
         }
+
+        /// <summary>
+        /// Closes all pooled TCP connections by disposing the shared transport.
+        /// The next request will create a fresh handler with a clean NTLM context.
+        /// Call this when the server starts returning 401 on keep-alive connections.
+        /// </summary>
+        public void ResetHttpTransport() => InvalidateSharedHttpClient();
+
+        public void Dispose() => InvalidateSharedHttpClient();
 
         internal ExchangeCredentials AdjustLinuxAuthentication(Uri url, ExchangeCredentials serviceCredentials)
         {
