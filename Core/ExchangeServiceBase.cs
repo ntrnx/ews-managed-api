@@ -244,8 +244,8 @@ namespace Microsoft.Exchange.WebServices.Data
         private void EnsureSharedHttpClient(Uri url, bool checkCerts, bool allowAutoRedirect)
         {
             // Detect if transport settings changed since the handler was created.
-            // URL is included because AdjustLinuxAuthentication builds a CredentialCache
-            // scoped to the specific URI.
+            // URL is included because AdjustNtlmAuthentication builds a CredentialCache
+            // scoped to the specific URI authority.
             if (_sharedHttpClient != null)
             {
                 if (_snapshotCheckCerts != checkCerts
@@ -316,10 +316,14 @@ namespace Microsoft.Exchange.WebServices.Data
                 if (serviceCredentials == null)
                     throw new ServiceLocalException(Strings.CredentialsRequired);
 
-                // Fix for authentication on Linux platform — avoid Negotiate/Kerberos
-                // timeout when KDC is unreachable (e.g. in Docker containers)
-                if (!RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
-                    serviceCredentials = AdjustLinuxAuthentication(url, serviceCredentials);
+                // When WebCredentials are used (IsKerberosEnabled=false), force an explicit
+                // CredentialCache so SocketsHttpHandler uses NTLM only.
+                // On Windows, SocketsHttpHandler with a plain NetworkCredential goes through
+                // SSPI which tries Kerberos/Negotiate first; when no KDC is reachable or the
+                // SPN is missing it never falls back to NTLM, causing 401.
+                // On Linux the same applies: Negotiate requires GSSAPI/libkrb5 which is absent
+                // in minimal Docker images.
+                serviceCredentials = AdjustNtlmAuthentication(url, serviceCredentials);
 
                 serviceCredentials.PreAuthenticate();
 
@@ -343,7 +347,13 @@ namespace Microsoft.Exchange.WebServices.Data
             _sharedHttpClientHandler = handler;
             _sharedHttpClient = new HttpClient(handler, disposeHandler: false)
             {
-                Timeout = System.Threading.Timeout.InfiniteTimeSpan
+                Timeout = System.Threading.Timeout.InfiniteTimeSpan,
+                // NTLM is a connection-level protocol and does not work over HTTP/2.
+                // Exchange returns HTTP_1_1_REQUIRED when h2 is attempted; .NET may not
+                // correctly restart the NTLM context after the downgrade, causing 401.
+                // Force HTTP/1.1 to skip the failed h2 negotiation entirely.
+                DefaultRequestVersion = System.Net.HttpVersion.Version11,
+                DefaultVersionPolicy = System.Net.Http.HttpVersionPolicy.RequestVersionExact
             };
 
             // Snapshot settings for staleness detection
@@ -378,30 +388,22 @@ namespace Microsoft.Exchange.WebServices.Data
 
         public void Dispose() => InvalidateSharedHttpClient();
 
-        internal ExchangeCredentials AdjustLinuxAuthentication(Uri url, ExchangeCredentials serviceCredentials)
+        internal ExchangeCredentials AdjustNtlmAuthentication(Uri url, ExchangeCredentials serviceCredentials)
         {
             if (!(serviceCredentials is WebCredentials))
-                // Nothing to adjust
                 return serviceCredentials;
 
             var networkCredentials = ((WebCredentials)serviceCredentials).Credentials as NetworkCredential;
-            if (networkCredentials != null)
-            {
-                // SocketsHttpHandler looks up credentials using the origin authority (scheme://host[:port]),
-                // not the full path URI. Registering with a path like /ews/exchange.asmx would never
-                // match a lookup against the base authority, causing GetCredential to return null and
-                // the NTLM handshake to never start.
-                // The authority URI (AbsolutePath = "/") is a prefix of any path on that host.
-                var credUri = new Uri(url.GetLeftPart(UriPartial.Authority));
-                CredentialCache credentialCache = new CredentialCache();
-                credentialCache.Add(credUri, "NTLM", networkCredentials);
-                credentialCache.Add(credUri, "Digest", networkCredentials);
-                credentialCache.Add(credUri, "Basic", networkCredentials);
-                if (!string.IsNullOrEmpty(networkCredentials.Domain))
-                    credentialCache.Add(credUri, "Negotiate", networkCredentials);
+            if (networkCredentials == null)
+                return serviceCredentials;
 
-                serviceCredentials = credentialCache;
-            }
+            var credUri = new Uri(url.GetLeftPart(UriPartial.Authority));
+            CredentialCache credentialCache = new CredentialCache();
+            credentialCache.Add(credUri, "Negotiate", networkCredentials);
+            credentialCache.Add(credUri, "NTLM", networkCredentials);
+            credentialCache.Add(credUri, "Basic", networkCredentials);
+
+            serviceCredentials = credentialCache;
             return serviceCredentials;
         }
 
