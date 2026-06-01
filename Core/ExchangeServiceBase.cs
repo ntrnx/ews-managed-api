@@ -387,12 +387,18 @@ namespace Microsoft.Exchange.WebServices.Data
             var networkCredentials = ((WebCredentials)serviceCredentials).Credentials as NetworkCredential;
             if (networkCredentials != null)
             {
+                // SocketsHttpHandler looks up credentials using the origin authority (scheme://host[:port]),
+                // not the full path URI. Registering with a path like /ews/exchange.asmx would never
+                // match a lookup against the base authority, causing GetCredential to return null and
+                // the NTLM handshake to never start.
+                // The authority URI (AbsolutePath = "/") is a prefix of any path on that host.
+                var credUri = new Uri(url.GetLeftPart(UriPartial.Authority));
                 CredentialCache credentialCache = new CredentialCache();
-                credentialCache.Add(url, "NTLM", networkCredentials);
-                credentialCache.Add(url, "Digest", networkCredentials);
-                credentialCache.Add(url, "Basic", networkCredentials);
+                credentialCache.Add(credUri, "NTLM", networkCredentials);
+                credentialCache.Add(credUri, "Digest", networkCredentials);
+                credentialCache.Add(credUri, "Basic", networkCredentials);
                 if (!string.IsNullOrEmpty(networkCredentials.Domain))
-                    credentialCache.Add(url, "Negotiate", networkCredentials);
+                    credentialCache.Add(credUri, "Negotiate", networkCredentials);
 
                 serviceCredentials = credentialCache;
             }
