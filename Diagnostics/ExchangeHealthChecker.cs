@@ -4,6 +4,7 @@ using System.Net;
 using System.Net.Http;
 using System.Threading.Tasks;
 using Microsoft.Exchange.WebServices.Data;
+#nullable enable
 
 namespace Microsoft.Exchange.WebServices.Diagnostics;
 
