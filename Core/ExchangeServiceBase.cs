@@ -110,6 +110,17 @@ namespace Microsoft.Exchange.WebServices.Data
         private HttpClient _sharedHttpClient;
         private TimeSpan _pooledConnectionLifetime = TimeSpan.FromHours(1);
 
+        // Guards all reads/writes of _sharedHttpClient/_sharedHttpClientHandler and the
+        // staleness snapshot fields below, so concurrent callers never observe a torn
+        // state and never race to build two handlers for the same generation.
+        private readonly object _transportLock = new object();
+
+        // How long a superseded HttpClient/handler is kept alive (undisposed) after being
+        // swapped out, so requests that captured a reference to it before the swap (started
+        // concurrently on another thread) have a chance to finish instead of being aborted
+        // mid-flight — HttpClient.Dispose() cancels any request still in progress on it.
+        private static readonly TimeSpan _supersededTransportGrace = TimeSpan.FromSeconds(30);
+
         // Snapshot of settings used to build the shared handler, for staleness detection
         private bool _snapshotCheckCerts;
         private bool _snapshotPreAuth;
@@ -169,10 +180,12 @@ namespace Microsoft.Exchange.WebServices.Data
             // AllowAutoRedirect, UseDefaultCredentials) are set once here and become
             // immutable after the first SendAsync call (.NET 8 SocketsHttpHandler constraint).
             // If any transport setting has changed since creation, the handler is rebuilt.
-            EnsureSharedHttpClient(url, checkCertificates, allowAutoRedirect);
+            // The reference is returned from inside the same lock that guards rebuilds/resets,
+            // so this thread always captures a consistent, not-yet-invalidated client.
+            HttpClient sharedClient = EnsureSharedHttpClient(url, checkCertificates, allowAutoRedirect);
 
             // Create lightweight request wrapper — no handler-level mutations
-            IEwsHttpWebRequest request = this.HttpWebRequestFactory.CreateRequest(url, _sharedHttpClient);
+            IEwsHttpWebRequest request = this.HttpWebRequestFactory.CreateRequest(url, sharedClient);
             try
             {
                 request.Timeout = this.Timeout;
@@ -241,8 +254,10 @@ namespace Microsoft.Exchange.WebServices.Data
         /// If mutable transport settings (Proxy, PreAuthenticate, CookieContainer, etc.)
         /// have changed since the handler was created, it is rebuilt.
         /// </summary>
-        private void EnsureSharedHttpClient(Uri url, bool checkCerts, bool allowAutoRedirect)
+        private HttpClient EnsureSharedHttpClient(Uri url, bool checkCerts, bool allowAutoRedirect)
         {
+          lock (_transportLock)
+          {
             // Detect if transport settings changed since the handler was created.
             // URL is included because AdjustNtlmAuthentication builds a CredentialCache
             // scoped to the specific URI authority.
@@ -256,11 +271,13 @@ namespace Microsoft.Exchange.WebServices.Data
                     || _snapshotUrl != url
                     || _snapshotPooledConnectionLifetime != _pooledConnectionLifetime)
                 {
+                    // Re-entrant on the same thread (Monitor supports recursion) — safe to
+                    // call while already holding _transportLock.
                     InvalidateSharedHttpClient();
                 }
                 else
                 {
-                    return;
+                    return _sharedHttpClient;
                 }
             }
 
@@ -364,19 +381,54 @@ namespace Microsoft.Exchange.WebServices.Data
             _snapshotCookieContainer = this.cookieContainer;
             _snapshotUrl = url;
             _snapshotPooledConnectionLifetime = _pooledConnectionLifetime;
+
+            return _sharedHttpClient;
+          }
         }
 
         /// <summary>
-        /// Disposes and resets the shared HttpClient/SocketsHttpHandler,
-        /// forcing re-creation on next PrepareHttpWebRequestForUrl call.
-        /// Closes all pooled TCP connections and releases NTLM session state.
+        /// Atomically swaps out the shared HttpClient/SocketsHttpHandler, forcing re-creation
+        /// on the next PrepareHttpWebRequestForUrl call, and disposes the superseded transport.
         /// </summary>
-        private void InvalidateSharedHttpClient()
+        /// <param name="deferDispose">
+        /// When true (the default — used for auth-triggered resets and <see cref="ResetHttpTransport"/>),
+        /// the superseded client/handler are disposed after <see cref="_supersededTransportGrace"/>
+        /// instead of immediately, so requests that captured a reference to them just before the
+        /// swap (concurrently, on another thread) get a chance to complete instead of being
+        /// aborted by Dispose(). This is best-effort, not a guarantee: a request that takes
+        /// longer than the grace period to complete can still be aborted. Full elimination would
+        /// require reference-counting in-flight requests per transport generation.
+        /// When false (service teardown via <see cref="Dispose"/>), disposal is immediate since
+        /// no further requests are expected.
+        /// </param>
+        private void InvalidateSharedHttpClient(bool deferDispose = true)
         {
-            _sharedHttpClient?.Dispose();
-            _sharedHttpClient = null;
-            _sharedHttpClientHandler?.Dispose();
-            _sharedHttpClientHandler = null;
+            HttpClient oldClient;
+            SocketsHttpHandler oldHandler;
+            lock (_transportLock)
+            {
+                oldClient = _sharedHttpClient;
+                oldHandler = _sharedHttpClientHandler;
+                _sharedHttpClient = null;
+                _sharedHttpClientHandler = null;
+            }
+
+            if (oldClient == null && oldHandler == null)
+                return;
+
+            if (deferDispose)
+            {
+                _ = System.Threading.Tasks.Task.Delay(_supersededTransportGrace).ContinueWith(_ =>
+                {
+                    try { oldClient?.Dispose(); } catch { /* best-effort cleanup */ }
+                    try { oldHandler?.Dispose(); } catch { /* best-effort cleanup */ }
+                }, System.Threading.Tasks.TaskScheduler.Default);
+            }
+            else
+            {
+                try { oldClient?.Dispose(); } catch { /* best-effort cleanup */ }
+                try { oldHandler?.Dispose(); } catch { /* best-effort cleanup */ }
+            }
         }
 
         /// <summary>
@@ -384,9 +436,9 @@ namespace Microsoft.Exchange.WebServices.Data
         /// The next request will create a fresh handler with a clean NTLM context.
         /// Call this when the server starts returning 401 on keep-alive connections.
         /// </summary>
-        public void ResetHttpTransport() => InvalidateSharedHttpClient();
+        public void ResetHttpTransport() => InvalidateSharedHttpClient(deferDispose: true);
 
-        public void Dispose() => InvalidateSharedHttpClient();
+        public void Dispose() => InvalidateSharedHttpClient(deferDispose: false);
 
         internal ExchangeCredentials AdjustNtlmAuthentication(Uri url, ExchangeCredentials serviceCredentials)
         {
@@ -460,6 +512,28 @@ namespace Microsoft.Exchange.WebServices.Data
                     string.Format(Strings.AccountIsLocked, accountUnlockUrl),
                     accountUnlockUrl,
                     webException);
+            }
+
+            // NTLM/Kerberos authentication is connection-oriented: SocketsHttpHandler already
+            // performs the challenge-response handshake internally inside SendAsync, so a 401
+            // that reaches application code means the handshake failed or the pooled
+            // connection's auth state is no longer recognized by the server/load balancer
+            // (e.g. IIS "Anonymous Request Disallowed" after a backend/affinity change).
+            // Reusing the same pooled connection will keep failing identically, so drop the
+            // whole shared transport here — the next request gets a brand-new connection and
+            // a clean handshake instead of repeating the same failure until process restart.
+            // Deliberately NOT triggered by 403 Forbidden: unlike 401, a 403 reaching this
+            // point means the NTLM/Kerberos handshake already SUCCEEDED and the server is
+            // rejecting the request for an authorization reason (no mailbox rights,
+            // impersonation denied, EWS disabled, policy restriction) — a fresh TCP
+            // connection would hit the exact same 403 immediately, so resetting the
+            // transport would only add churn without fixing anything.
+            if (httpWebResponse.StatusCode == HttpStatusCode.Unauthorized)
+            {
+                this.TraceMessage(
+                    responseTraceFlag,
+                    string.Format("Resetting HTTP transport after {0} response.", httpWebResponse.StatusCode));
+                this.InvalidateSharedHttpClient();
             }
         }
 
