@@ -451,13 +451,9 @@ namespace Microsoft.Exchange.WebServices.Data
 
             var credUri = new Uri(url.GetLeftPart(UriPartial.Authority));
             CredentialCache credentialCache = new CredentialCache();
-            // "Negotiate" (GSSAPI/Kerberos) is intentionally excluded: on Linux it requires
-            // gss-ntlmssp and a reachable KDC; without them SocketsHttpHandler fails the
-            // entire auth exchange, causing ResponseEnded instead of falling back to NTLM.
-            // On Windows SSPI handles Negotiate→NTLM transparently, but to keep identical
-            // behaviour across platforms we use NTLM-only here (IsKerberosEnabled=false path).
             credentialCache.Add(credUri, "NTLM", networkCredentials);
             credentialCache.Add(credUri, "Basic", networkCredentials);
+			credentialCache.Add(credUri, "Negotiate", networkCredentials);
 
             serviceCredentials = credentialCache;
             return serviceCredentials;
