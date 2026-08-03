@@ -453,7 +453,10 @@ namespace Microsoft.Exchange.WebServices.Data
             CredentialCache credentialCache = new CredentialCache();
             credentialCache.Add(credUri, "NTLM", networkCredentials);
             credentialCache.Add(credUri, "Basic", networkCredentials);
-			credentialCache.Add(credUri, "Negotiate", networkCredentials);
+            if (GlobalSettings.IsNegotiateAuthEnabled)
+            {
+                credentialCache.Add(credUri, "Negotiate", networkCredentials);
+            }
 
             serviceCredentials = credentialCache;
             return serviceCredentials;
