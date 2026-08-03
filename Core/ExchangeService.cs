@@ -5127,10 +5127,13 @@ namespace Microsoft.Exchange.WebServices.Data
         /// the specified version of EWS and scoped to the system's current time zone.
         /// </summary>
         /// <param name="requestedServerVersion">The version of EWS that the service targets.</param>
-        public ExchangeService(ExchangeVersion requestedServerVersion, bool checkCertificates)
+        /// <param name="checkCertificates">Whether to validate the server's SSL certificate.</param>
+        /// <param name="enableNegotiateAuth">Whether the "Negotiate" auth scheme is added to the credential cache in <see cref="ExchangeServiceBase.AdjustNtlmAuthentication"/>.</param>
+        public ExchangeService(ExchangeVersion requestedServerVersion, bool checkCertificates, bool enableNegotiateAuth = true)
             : base(requestedServerVersion)
 		{
 			GlobalSettings.CheckCertificates = checkCertificates;
+			GlobalSettings.IsNegotiateAuthEnabled = enableNegotiateAuth;
 		}
 
         /// <summary>
