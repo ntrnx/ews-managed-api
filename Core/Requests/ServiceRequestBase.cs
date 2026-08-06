@@ -794,12 +794,30 @@ namespace Microsoft.Exchange.WebServices.Data
         /// <returns>An IEwsHttpWebResponse instance</returns>
         protected async Task<IEwsHttpWebResponse> GetEwsHttpWebResponse(IEwsHttpWebRequest request, CancellationToken token)
         {
+            // Diagnostics-only: brackets the single point where every actual HTTP call this
+            // request makes either succeeds or fails, so ActiveRequestCount/ConsecutiveFailures/
+            // Consecutive401Count/LastSuccessfulRequestUtc stay accurate regardless of which path
+            // below returns or throws.
+            this.Service.BeginRequestTracking();
+            bool success = false;
+            HttpStatusCode? statusCode = null;
             try
             {
-                return await request.GetResponse(token).ConfigureAwait(false);
+                IEwsHttpWebResponse response = await request.GetResponse(token).ConfigureAwait(false);
+                success = true;
+                statusCode = response.StatusCode;
+
+                // Response headers (X-FEServer/X-BEServer/cookies/...) are otherwise only
+                // captured on error paths (401/500) below — capturing them here too makes the
+                // "normal" FE server/cookie baseline visible, not just the failure snapshot.
+                this.Service.ProcessHttpResponseHeaders(TraceFlags.EwsResponseHttpHeaders, response);
+
+                return response;
             }
             catch (EwsHttpClientException ex)
             {
+                statusCode = ex.Response?.StatusCode;
+
                 if (ex.IsProtocolError && ex.Response != null)
                 {
                     await this.ProcessEwsHttpClientException(ex);
@@ -812,6 +830,22 @@ namespace Microsoft.Exchange.WebServices.Data
             {
                 // Wrap exception.
                 throw new ServiceRequestException(string.Format(Strings.ServiceRequestFailed, e.Message), e);
+            }
+            finally
+            {
+                this.Service.EndRequestTracking(success, statusCode);
+
+                // Investigation-only: force a brand-new TCP connection + fresh NTLM handshake for
+                // every subsequent EWS call, instead of reusing the pooled connection. Deliberately
+                // done AFTER the response has been fully received (here, not via a "Connection:
+                // close" request header) — closing mid-flight makes .NET's own NTLM implementation
+                // fail immediately with "Authentication failed because the connection could not be
+                // reused" (AuthenticationHelper.SendWithNtAuthAsync requires the connection to stay
+                // reusable for the challenge/response exchange within one call). This is more
+                // expensive than normal — a full NTLM handshake on every single SOAP call, not just
+                // once per operation — observable via the ExchangeConnectionDiag/
+                // ExchangeClientLifecycle logging added alongside this.
+                this.Service.ResetHttpTransport();
             }
         }
 

@@ -31,6 +31,7 @@ namespace Microsoft.Exchange.WebServices.Data
     using System.Collections.Generic;
     using System.Globalization;
     using System.IO;
+    using System.Linq;
     using System.Net;
     using System.Net.Http;
     using System.Net.Http.Headers;
@@ -130,6 +131,44 @@ namespace Microsoft.Exchange.WebServices.Data
         private CookieContainer _snapshotCookieContainer;
         private Uri _snapshotUrl;
         private TimeSpan _snapshotPooledConnectionLifetime;
+
+        // Diagnostics-only: when the current transport generation was built, and how many
+        // requests it has served, so InvalidateSharedHttpClient can log how long a connection
+        // actually lived before being torn down (and why).
+        private DateTime _transportCreatedAtUtc;
+        private long _transportRequestCount;
+
+        // Diagnostics-only: stable short identifiers for the objects in this service's transport
+        // graph, so log lines produced by different call sites can be correlated to the same
+        // instance. ExchangeServiceId is assigned once per ExchangeServiceBase instance and
+        // survives transport resets; the others are regenerated whenever the object they name
+        // is actually rebuilt (see ExchangeDiagnosticIds/ExchangeOperationScope).
+        public readonly string ExchangeServiceId = ExchangeDiagnosticIds.NewId();
+        private string _httpClientId;
+        private string _httpHandlerId;
+
+        /// <summary>
+        /// Diagnostics-only: id of the current shared <see cref="HttpClient"/>/<see cref="SocketsHttpHandler"/>
+        /// generation (regenerated whenever the transport is rebuilt — see <see cref="EnsureSharedHttpClient"/>).
+        /// Public so callers (e.g. <c>ExchangeCalendarManager</c> exception logging) can tag their
+        /// own log lines with the same "ExchangeClientId" that appears in transport/connection logs.
+        /// </summary>
+        public string HttpClientId => _httpClientId;
+        private string _cookieContainerId = ExchangeDiagnosticIds.NewId();
+
+        // Diagnostics-only: request concurrency and success/failure tracking for this instance.
+        private int _activeRequestCount;
+        private int _consecutiveFailures;
+        private int _consecutive401Count;
+        private DateTime? _lastSuccessfulRequestUtc;
+        private string _lastFeServer;
+
+        // Diagnostics-only: snapshot of the transport generation just torn down by
+        // InvalidateSharedHttpClient, consumed by the next EnsureSharedHttpClient call to log a
+        // paired "reset completed" line with both the old and the new ids.
+        private string _lastResetOldClientId;
+        private string _lastResetOldHandlerId;
+        private string _lastResetReason;
         #endregion
 
         #region Event handlers
@@ -184,6 +223,7 @@ namespace Microsoft.Exchange.WebServices.Data
             // The reference is returned from inside the same lock that guards rebuilds/resets,
             // so this thread always captures a consistent, not-yet-invalidated client.
             HttpClient sharedClient = EnsureSharedHttpClient(url, checkCertificates, allowAutoRedirect);
+            System.Threading.Interlocked.Increment(ref _transportRequestCount);
 
             // Create lightweight request wrapper — no handler-level mutations
             IEwsHttpWebRequest request = this.HttpWebRequestFactory.CreateRequest(url, sharedClient);
@@ -274,7 +314,7 @@ namespace Microsoft.Exchange.WebServices.Data
                 {
                     // Re-entrant on the same thread (Monitor supports recursion) — safe to
                     // call while already holding _transportLock.
-                    InvalidateSharedHttpClient();
+                    InvalidateSharedHttpClient(reason: "SettingsMismatch");
                 }
                 else
                 {
@@ -300,15 +340,33 @@ namespace Microsoft.Exchange.WebServices.Data
             handler.ConnectCallback = async (context, cancellationToken) =>
             {
                 Socket socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+                DateTime dnsResolutionStartUtc = DateTime.UtcNow;
                 try
                 {
                     await socket.ConnectAsync(context.DnsEndPoint, cancellationToken).ConfigureAwait(false);
                     this.TraceMessage(TraceFlags.DebugMessage, $"EWS connect OK: {context.DnsEndPoint} -> {socket.RemoteEndPoint} (local {socket.LocalEndPoint})");
+
+                    // Diagnostics-only: assigned here because this callback only fires when
+                    // SocketsHttpHandler opens a brand new physical connection (pooled reuse never
+                    // invokes it) — IsNewConnection=true is therefore a fact, not a guess. The
+                    // converse (a request reusing an existing pooled connection) is deliberately
+                    // NOT logged: SocketsHttpHandler doesn't expose which pooled connection served
+                    // a given request, so a "reused, ConnectionId=N" line would be a guess.
+                    string connectionId = ExchangeDiagnosticIds.NewId();
+                    TraceConnectionDiag(string.Format(
+                        "EWS connection established. ConnectionId={0} EwsHost={1} SelectedAddress={2} LocalEndpoint={3} RemoteEndpoint={4}"
+                        + " IsNewConnection=true DnsResolutionUtc={5:o} ExchangeClientId={6} ExchangeServiceId={7}",
+                        connectionId, context.DnsEndPoint.Host, socket.RemoteEndPoint, socket.LocalEndPoint, socket.RemoteEndPoint,
+                        dnsResolutionStartUtc, _httpClientId, ExchangeServiceId));
+
                     return new NetworkStream(socket, ownsSocket: true);
                 }
                 catch (Exception ex)
                 {
                     this.TraceMessage(TraceFlags.DebugMessage,$"EWS connect FAILED: {context.DnsEndPoint}: {ex.Message}");
+                    TraceConnectionDiag(string.Format(
+                        "EWS connection failed. EwsHost={0} ExceptionType={1} Message={2} ExchangeClientId={3} ExchangeServiceId={4}",
+                        context.DnsEndPoint.Host, ex.GetType().Name, ex.Message, _httpClientId, ExchangeServiceId));
                     socket.Dispose();
                     throw;
                 }
@@ -349,6 +407,7 @@ namespace Microsoft.Exchange.WebServices.Data
             if (this.useDefaultCredentials)
             {
                 handler.Credentials = CredentialCache.DefaultNetworkCredentials;
+                this.TraceMessage(TraceFlags.DebugMessage, "Transport credentials: DefaultNetworkCredentials");
             }
             else
             {
@@ -382,7 +441,16 @@ namespace Microsoft.Exchange.WebServices.Data
                             handler.SslOptions.ClientCertificates.Add(cert);
                     }
                 }
+
+                this.TraceMessage(TraceFlags.DebugMessage,
+                    "Transport credentials: " + DescribeCredentials(handler.Credentials));
             }
+
+            _transportCreatedAtUtc = DateTime.UtcNow;
+            _transportRequestCount = 0;
+
+            _httpClientId = ExchangeDiagnosticIds.NewId();
+            _httpHandlerId = ExchangeDiagnosticIds.NewId();
 
             _sharedHttpClientHandler = handler;
             _sharedHttpClient = new HttpClient(handler, disposeHandler: false)
@@ -405,8 +473,87 @@ namespace Microsoft.Exchange.WebServices.Data
             _snapshotUrl = url;
             _snapshotPooledConnectionLifetime = _pooledConnectionLifetime;
 
+            TraceClientLifecycleDiag(string.Format(
+                "Exchange client created. ExchangeClientId={0} ExchangeServiceId={1} HttpClientId={0} HttpHandlerId={2} CookieContainerId={3}"
+                + " PooledConnectionLifetime={4} PooledConnectionIdleTimeout={5} MaxConnectionsPerServer={6} (not configured explicitly, SocketsHttpHandler default)"
+                + " UseCookies={7} PreAuthenticate={8} AllowAutoRedirect={9} UseProxy={10} ProxyAddress={11}",
+                _httpClientId, ExchangeServiceId, _httpHandlerId, _cookieContainerId,
+                _pooledConnectionLifetime, handler.PooledConnectionIdleTimeout, handler.MaxConnectionsPerServer,
+                handler.UseCookies, handler.PreAuthenticate, handler.AllowAutoRedirect,
+                handler.UseProxy, this.webProxy == null ? "(none)" : SafeDescribeProxy(this.webProxy, url)));
+
+            if (_lastResetOldClientId != null)
+            {
+                TraceClientLifecycleDiag(string.Format(
+                    "Exchange client reset completed. OldExchangeClientId={0} NewExchangeClientId={1} OldHttpHandlerId={2} NewHttpHandlerId={3} Reason={4}",
+                    _lastResetOldClientId, _httpClientId, _lastResetOldHandlerId, _httpHandlerId, _lastResetReason));
+
+                _lastResetOldClientId = null;
+                _lastResetOldHandlerId = null;
+                _lastResetReason = null;
+            }
+
             return _sharedHttpClient;
           }
+        }
+
+        /// <summary>
+        /// Diagnostics-only: describes the identity (domain\username, never the password/token)
+        /// backing an <see cref="ICredentials"/> instance, so a handler rebuild can be traced
+        /// against which account it was actually configured with.
+        /// </summary>
+        private static string DescribeCredentials(ICredentials credentials)
+        {
+            switch (credentials)
+            {
+                case null:
+                    return "null";
+                case NetworkCredential nc:
+                    return FormatCredentialIdentity(nc);
+                case CredentialCache cc:
+                    try
+                    {
+                        var identities = new List<string>();
+                        foreach (NetworkCredential entry in cc)
+                        {
+                            string identity = FormatCredentialIdentity(entry);
+                            if (!identities.Contains(identity))
+                                identities.Add(identity);
+                        }
+                        return identities.Count > 0 ? string.Join(",", identities) : "CredentialCache(empty)";
+                    }
+                    catch
+                    {
+                        return "CredentialCache(unreadable)";
+                    }
+                default:
+                    return credentials.GetType().Name;
+            }
+        }
+
+        private static string FormatCredentialIdentity(NetworkCredential credential)
+        {
+            return string.IsNullOrEmpty(credential.Domain)
+                ? credential.UserName
+                : credential.Domain + "\\" + credential.UserName;
+        }
+
+        /// <summary>
+        /// Diagnostics-only: resolves the proxy address that would actually be used for
+        /// <paramref name="url"/>, without performing any network I/O (<see cref="IWebProxy.GetProxy"/>
+        /// only evaluates the proxy's own bypass rules).
+        /// </summary>
+        private static string SafeDescribeProxy(IWebProxy proxy, Uri url)
+        {
+            try
+            {
+                Uri proxyUri = proxy.GetProxy(url);
+                return proxyUri == null || proxyUri == url ? "(bypassed)" : proxyUri.ToString();
+            }
+            catch
+            {
+                return "(unavailable)";
+            }
         }
 
         /// <summary>
@@ -424,14 +571,27 @@ namespace Microsoft.Exchange.WebServices.Data
         /// When false (service teardown via <see cref="Dispose"/>), disposal is immediate since
         /// no further requests are expected.
         /// </param>
-        private void InvalidateSharedHttpClient(bool deferDispose = true)
+        /// <param name="reason">
+        /// Diagnostics-only: why the transport is being torn down (e.g. "Unauthorized",
+        /// "SettingsMismatch", "CredentialsChanged", "Disposed"). Logged together with how
+        /// long the superseded transport lived and how many requests it served, so a storm of
+        /// 401s can be told apart from a connection that was simply never reused for long.
+        /// </param>
+        private void InvalidateSharedHttpClient(bool deferDispose = true, string reason = null)
         {
             HttpClient oldClient;
             SocketsHttpHandler oldHandler;
+            DateTime createdAt;
+            long requestCount;
+            string oldClientId, oldHandlerId;
             lock (_transportLock)
             {
                 oldClient = _sharedHttpClient;
                 oldHandler = _sharedHttpClientHandler;
+                createdAt = _transportCreatedAtUtc;
+                requestCount = _transportRequestCount;
+                oldClientId = _httpClientId;
+                oldHandlerId = _httpHandlerId;
                 _sharedHttpClient = null;
                 _sharedHttpClientHandler = null;
             }
@@ -439,18 +599,38 @@ namespace Microsoft.Exchange.WebServices.Data
             if (oldClient == null && oldHandler == null)
                 return;
 
+            this.TraceMessage(TraceFlags.DebugMessage,
+                string.Format(
+                    "Invalidating transport (reason={0}): age={1}, requestsServed={2}",
+                    reason ?? "Unspecified",
+                    DateTime.UtcNow - createdAt,
+                    requestCount));
+
+            TraceClientLifecycleDiag(string.Format(
+                "Exchange client reset started. Reason={0} OldExchangeClientId={1} OldHttpHandlerId={2} ExchangeServiceId={3}",
+                reason ?? "Unspecified", oldClientId, oldHandlerId, ExchangeServiceId));
+
+            // Consumed by the next EnsureSharedHttpClient call to log the paired "reset completed"
+            // line. Deliberately not cleared here: if no new request follows before this service
+            // is disposed, the "completed" half is simply never logged — expected and harmless.
+            _lastResetOldClientId = oldClientId;
+            _lastResetOldHandlerId = oldHandlerId;
+            _lastResetReason = reason ?? "Unspecified";
+
             if (deferDispose)
             {
                 _ = System.Threading.Tasks.Task.Delay(_supersededTransportGrace).ContinueWith(_ =>
                 {
                     try { oldClient?.Dispose(); } catch { /* best-effort cleanup */ }
                     try { oldHandler?.Dispose(); } catch { /* best-effort cleanup */ }
+                    TraceClientLifecycleDiag(string.Format("HttpHandlerDisposed. HttpHandlerId={0} HttpClientId={1}", oldHandlerId, oldClientId));
                 }, System.Threading.Tasks.TaskScheduler.Default);
             }
             else
             {
                 try { oldClient?.Dispose(); } catch { /* best-effort cleanup */ }
                 try { oldHandler?.Dispose(); } catch { /* best-effort cleanup */ }
+                TraceClientLifecycleDiag(string.Format("HttpHandlerDisposed. HttpHandlerId={0} HttpClientId={1}", oldHandlerId, oldClientId));
             }
         }
 
@@ -459,9 +639,75 @@ namespace Microsoft.Exchange.WebServices.Data
         /// The next request will create a fresh handler with a clean NTLM context.
         /// Call this when the server starts returning 401 on keep-alive connections.
         /// </summary>
-        public void ResetHttpTransport() => InvalidateSharedHttpClient(deferDispose: true);
+        public void ResetHttpTransport() => InvalidateSharedHttpClient(deferDispose: true, reason: "ResetHttpTransport");
 
-        public void Dispose() => InvalidateSharedHttpClient(deferDispose: false);
+        public void Dispose() => InvalidateSharedHttpClient(deferDispose: false, reason: "Disposed");
+
+        /// <summary>
+        /// Diagnostics-only: called by <see cref="Requests.ServiceRequestBase"/> immediately before
+        /// sending each HTTP request on this service. Tracks how many requests are in flight
+        /// concurrently on this <see cref="ExchangeServiceBase"/> instance and logs the correlation
+        /// ids (OperationId/Operation/Attempt come from the ambient <see cref="ExchangeOperationScope"/>
+        /// set by the caller, e.g. an <c>ExchangeCalendarManager</c> public method).
+        /// </summary>
+        internal void BeginRequestTracking()
+        {
+            int activeRequestCount = System.Threading.Interlocked.Increment(ref _activeRequestCount);
+
+            if (!this.TraceEnabled)
+            {
+                return;
+            }
+
+            ExchangeOperationScope.Snapshot op = ExchangeOperationScope.Current;
+            TraceDiag("ExchangeConnectionDiag", string.Format(
+                "Exchange request starting. OperationId={0} Operation={1} Attempt={2} ExchangeClientId={3} ExchangeServiceId={4}"
+                + " ActiveRequestCount={5} ThreadId={6} TaskId={7}",
+                op.OperationId, op.Operation, op.Attempt, _httpClientId, ExchangeServiceId,
+                activeRequestCount, Environment.CurrentManagedThreadId,
+                System.Threading.Tasks.Task.CurrentId?.ToString() ?? "-"));
+        }
+
+        /// <summary>
+        /// Diagnostics-only: called by <see cref="Requests.ServiceRequestBase"/> after each HTTP
+        /// request on this service completes (success or failure). Maintains the consecutive
+        /// failure/401 counters and last-success timestamp surfaced in retry/reset log lines.
+        /// </summary>
+        internal void EndRequestTracking(bool success, HttpStatusCode? statusCode)
+        {
+            int activeRequestCount = System.Threading.Interlocked.Decrement(ref _activeRequestCount);
+
+            if (success)
+            {
+                _consecutiveFailures = 0;
+                _consecutive401Count = 0;
+                _lastSuccessfulRequestUtc = DateTime.UtcNow;
+            }
+            else
+            {
+                _consecutiveFailures++;
+                if (statusCode == HttpStatusCode.Unauthorized)
+                {
+                    _consecutive401Count++;
+                }
+            }
+
+            if (!this.TraceEnabled)
+            {
+                return;
+            }
+
+            ExchangeOperationScope.Snapshot op = ExchangeOperationScope.Current;
+            DateTime? lastSuccess = _lastSuccessfulRequestUtc;
+            TraceDiag("ExchangeConnectionDiag", string.Format(
+                "Exchange request completed. OperationId={0} Operation={1} Attempt={2} ExchangeClientId={3}"
+                + " Success={4} HttpStatus={5} ActiveRequestCount={6} ConsecutiveFailures={7} Consecutive401Count={8}"
+                + " LastSuccessfulRequestUtc={9} TimeSinceLastSuccess={10}",
+                op.OperationId, op.Operation, op.Attempt, _httpClientId,
+                success, statusCode?.ToString() ?? "-", activeRequestCount, _consecutiveFailures, _consecutive401Count,
+                lastSuccess?.ToString("o") ?? "never",
+                lastSuccess.HasValue ? (DateTime.UtcNow - lastSuccess.Value).ToString() : "-"));
+        }
 
         internal ExchangeCredentials AdjustNtlmAuthentication(Uri url, ExchangeCredentials serviceCredentials)
         {
@@ -555,7 +801,7 @@ namespace Microsoft.Exchange.WebServices.Data
                 this.TraceMessage(
                     responseTraceFlag,
                     string.Format("Resetting HTTP transport after {0} response.", httpWebResponse.StatusCode));
-                this.InvalidateSharedHttpClient();
+                this.InvalidateSharedHttpClient(reason: "Unauthorized");
             }
         }
 
@@ -591,6 +837,35 @@ namespace Microsoft.Exchange.WebServices.Data
                 this.TraceListener.Trace(traceTypeStr, logMessage);
             }
         }
+
+        /// <summary>
+        /// Diagnostics-only: writes a structured trace line under the given category. Reuses the
+        /// existing <see cref="TraceEnabled"/> switch (the same one the per-integration
+        /// "ExchangeTraceEnabled" setting already controls) rather than introducing a second,
+        /// independent on/off switch — one place to turn EWS diagnostics on for an integration.
+        /// Never throws.
+        /// </summary>
+        private void TraceDiag(string category, string logEntry)
+        {
+            if (!this.TraceEnabled)
+            {
+                return;
+            }
+
+            try
+            {
+                string logMessage = EwsUtilities.FormatLogMessage(category, logEntry);
+                this.TraceListener?.Trace(category, logMessage);
+            }
+            catch
+            {
+                // Diagnostics must never break the actual request flow.
+            }
+        }
+
+        private void TraceConnectionDiag(string logEntry) => TraceDiag("ExchangeConnectionDiag", logEntry);
+
+        private void TraceClientLifecycleDiag(string logEntry) => TraceDiag("ExchangeClientLifecycle", logEntry);
 
         /// <summary>
         /// Logs the specified XML to the TraceListener if tracing is enabled.
@@ -633,6 +908,88 @@ namespace Microsoft.Exchange.WebServices.Data
             this.TraceHttpResponseHeaders(traceType, response);
 
             this.SaveHttpResponseHeaders(response.Headers);
+
+            this.TraceDiagResponseHeaders(response);
+        }
+
+        /// <summary>
+        /// Diagnostics-only: extracts the specific Exchange/IIS response headers useful for
+        /// telling apart a client-side problem from a load-balancer/backend-affinity problem
+        /// (X-FEServer/X-BEServer changing between requests, WWW-Authenticate scheme offered,
+        /// Persistent-Auth), plus cookie names (never values) to check backend affinity.
+        /// Called for BOTH success and error responses (see <see cref="Requests.ServiceRequestBase"/>
+        /// for the success-path call) — errors alone don't show what the "normal" FE server is.
+        /// </summary>
+        private void TraceDiagResponseHeaders(IEwsHttpWebResponse response)
+        {
+            if (!this.TraceEnabled)
+            {
+                return;
+            }
+
+            HttpResponseHeaders headers = response.Headers;
+            string feServer = GetHeaderValue(headers, "X-FEServer");
+            string previousFeServer = _lastFeServer;
+            if (!string.IsNullOrEmpty(feServer))
+            {
+                _lastFeServer = feServer;
+            }
+
+            ExchangeOperationScope.Snapshot op = ExchangeOperationScope.Current;
+            string wwwAuthSchemes = headers.WwwAuthenticate.Count > 0
+                ? string.Join(",", headers.WwwAuthenticate.Select(h => h.Scheme))
+                : string.Empty;
+
+            TraceDiag("ExchangeConnectionDiag", string.Format(
+                "Exchange response headers. OperationId={0} Operation={1} ExchangeClientId={2} HttpStatus={3} RequestId={4}"
+                + " X-FEServer={5} PreviousX-FEServer={6} X-BEServer={7} X-CalculatedBETarget={8} X-DiagInfo={9}"
+                + " PersistentAuth={10} WWW-Authenticate={11}",
+                op.OperationId, op.Operation, _httpClientId, (int)response.StatusCode,
+                GetHeaderValue(headers, "RequestId") ?? GetHeaderValue(headers, "request-id") ?? "-",
+                feServer ?? "-", previousFeServer ?? "-", GetHeaderValue(headers, "X-BEServer") ?? "-",
+                GetHeaderValue(headers, "X-CalculatedBETarget") ?? "-", GetHeaderValue(headers, "X-DiagInfo") ?? "-",
+                GetHeaderValue(headers, "Persistent-Auth") ?? "-", wwwAuthSchemes));
+
+            if (!string.IsNullOrEmpty(feServer) && !string.IsNullOrEmpty(previousFeServer)
+                && !string.Equals(feServer, previousFeServer, StringComparison.OrdinalIgnoreCase))
+            {
+                TraceDiag("ExchangeConnectionDiag", string.Format(
+                    "Exchange frontend server changed. OperationId={0} ExchangeClientId={1} PreviousX-FEServer={2} X-FEServer={3} HttpStatus={4}",
+                    op.OperationId, _httpClientId, previousFeServer, feServer, (int)response.StatusCode));
+            }
+
+            IEnumerable<string> receivedCookieNames = headers.TryGetValues("Set-Cookie", out var setCookieValues)
+                ? setCookieValues.Select(ExtractCookieName).Where(n => n != null)
+                : Enumerable.Empty<string>();
+
+            List<Cookie> sentCookies = new List<Cookie>();
+            try
+            {
+                if (response.ResponseUri != null)
+                {
+                    sentCookies = this.cookieContainer.GetCookies(response.ResponseUri).Cast<Cookie>().ToList();
+                }
+            }
+            catch
+            {
+                // Diagnostics must never break the actual request flow.
+            }
+
+            TraceDiag("ExchangeConnectionDiag", string.Format(
+                "Exchange cookies. OperationId={0} CookieContainerId={1} ReceivedCookieNames={2} SentCookieNames={3} CookieCount={4}",
+                op.OperationId, _cookieContainerId,
+                string.Join(",", receivedCookieNames),
+                string.Join(",", sentCookies.Select(c => c.Name)),
+                sentCookies.Count));
+        }
+
+        private static string GetHeaderValue(HttpResponseHeaders headers, string name) =>
+            headers.TryGetValues(name, out var values) ? values.FirstOrDefault() : null;
+
+        private static string ExtractCookieName(string setCookieValue)
+        {
+            int idx = setCookieValue?.IndexOf('=') ?? -1;
+            return idx > 0 ? setCookieValue.Substring(0, idx).Trim() : null;
         }
 
         /// <summary>
@@ -996,6 +1353,7 @@ namespace Microsoft.Exchange.WebServices.Data
             {
                 this.traceListener = value;
                 this.traceEnabled = value != null;
+                NtlmAuthDiagnostics.Sink ??= value;
             }
         }
 
@@ -1015,7 +1373,8 @@ namespace Microsoft.Exchange.WebServices.Data
                 this.credentials = value;
                 this.useDefaultCredentials = false;
                 this.cookieContainer = new CookieContainer();       // Changing credentials resets the Cookie container
-                InvalidateSharedHttpClient();
+                _cookieContainerId = ExchangeDiagnosticIds.NewId();
+                InvalidateSharedHttpClient(reason: "CredentialsChanged");
             }
         }
 
@@ -1039,7 +1398,8 @@ namespace Microsoft.Exchange.WebServices.Data
                 {
                     this.credentials = null;
                     this.cookieContainer = new CookieContainer();   // Changing credentials resets the Cookie container
-                    InvalidateSharedHttpClient();
+                    _cookieContainerId = ExchangeDiagnosticIds.NewId();
+                    InvalidateSharedHttpClient(reason: "UseDefaultCredentialsChanged");
                 }
             }
         }
