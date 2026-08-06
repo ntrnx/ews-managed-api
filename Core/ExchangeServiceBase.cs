@@ -35,6 +35,7 @@ namespace Microsoft.Exchange.WebServices.Data
     using System.Net.Http;
     using System.Net.Http.Headers;
     using System.Net.Security;
+    using System.Net.Sockets;
     using System.Runtime.InteropServices;
     using System.Security.Cryptography;
     using System.Security.Cryptography.X509Certificates;
@@ -289,6 +290,28 @@ namespace Microsoft.Exchange.WebServices.Data
                 AllowAutoRedirect = allowAutoRedirect,
                 PooledConnectionLifetime = _pooledConnectionLifetime,
                 PooledConnectionIdleTimeout = System.Threading.Timeout.InfiniteTimeSpan,
+            };
+
+            // Diagnostic-only: logs which remote IP each new physical TCP connection actually
+            // lands on, to correlate against Anonymous/InvalidToken failures without touching
+            // auth/retry semantics. Mirrors the connect .NET performs by default (DNS resolution
+            // and address selection happen inside Socket.ConnectAsync(DnsEndPoint, ...) exactly
+            // as SocketsHttpHandler would do internally); this callback only observes the result.
+            handler.ConnectCallback = async (context, cancellationToken) =>
+            {
+                Socket socket = new Socket(SocketType.Stream, ProtocolType.Tcp) { NoDelay = true };
+                try
+                {
+                    await socket.ConnectAsync(context.DnsEndPoint, cancellationToken).ConfigureAwait(false);
+                    this.TraceMessage(TraceFlags.DebugMessage, $"EWS connect OK: {context.DnsEndPoint} -> {socket.RemoteEndPoint} (local {socket.LocalEndPoint})");
+                    return new NetworkStream(socket, ownsSocket: true);
+                }
+                catch (Exception ex)
+                {
+                    this.TraceMessage(TraceFlags.DebugMessage,$"EWS connect FAILED: {context.DnsEndPoint}: {ex.Message}");
+                    socket.Dispose();
+                    throw;
+                }
             };
 
             // Certificate validation
