@@ -834,18 +834,6 @@ namespace Microsoft.Exchange.WebServices.Data
             finally
             {
                 this.Service.EndRequestTracking(success, statusCode);
-
-                // Investigation-only: force a brand-new TCP connection + fresh NTLM handshake for
-                // every subsequent EWS call, instead of reusing the pooled connection. Deliberately
-                // done AFTER the response has been fully received (here, not via a "Connection:
-                // close" request header) — closing mid-flight makes .NET's own NTLM implementation
-                // fail immediately with "Authentication failed because the connection could not be
-                // reused" (AuthenticationHelper.SendWithNtAuthAsync requires the connection to stay
-                // reusable for the challenge/response exchange within one call). This is more
-                // expensive than normal — a full NTLM handshake on every single SOAP call, not just
-                // once per operation — observable via the ExchangeConnectionDiag/
-                // ExchangeClientLifecycle logging added alongside this.
-                this.Service.ResetHttpTransport();
             }
         }
 
