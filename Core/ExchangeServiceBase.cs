@@ -395,6 +395,24 @@ namespace Microsoft.Exchange.WebServices.Data
                 return false;
             };
 
+            /*
+            The callback above only suppresses the *verdict* of the check: .NET invokes it after the certificate chain has already been built, and building the chain is what goes to the network.
+            When the server presents an incomplete chain (leaf only, without the CA certificate), .NET fetches the missing issuer from the AIA (caIssuers) extension - a plain http:// URL, i.e. port 80 on the CA host.
+            If that host is firewalled off, every handshake stalls in SYN_SENT until the connect timeout, even though certificate checking is switched off in the settings.
+            With checkCerts == false a downloaded issuer cannot change the outcome, so skip the download altogether.
+            Do NOT do this when checkCerts == true:
+			there the download is exactly what lets chain building succeed where validation is wanted and works.
+            */
+            if (!checkCerts)
+            {
+                handler.SslOptions.CertificateRevocationCheckMode = X509RevocationMode.NoCheck;
+                handler.SslOptions.CertificateChainPolicy = new X509ChainPolicy // CertificateChainPolicy takes precedence over CertificateRevocationCheckMode above (the policy's RevocationMode wins); both are set for explicitness.
+                {
+                    DisableCertificateDownloads = true,
+                    RevocationMode = X509RevocationMode.NoCheck,
+                };
+            }
+
             // Proxy
             if (this.webProxy != null)
             {
