@@ -42,6 +42,14 @@ namespace Microsoft.Exchange.WebServices.Data
     public delegate void ResponseHeadersCapturedHandler(HttpResponseHeaders responseHeaders);
 
     /// <summary>
+    /// Delegate method to handle the result of a self-check run after an HTTP 401 response, which
+    /// tells whether the authentication mechanism (NTLM/Negotiate) could produce an outgoing token.
+    /// </summary>
+    /// <param name="diagnosticMessage">Human-readable diagnostic message (status per auth package, or
+    /// the exception the self-check itself hit, if any).</param>
+    public delegate void AuthenticationFailureDiagnosedHandler(string diagnosticMessage);
+
+    /// <summary>
     /// Defines a delegate used to notify that a service object has been modified.
     /// </summary>
     /// <param name="serviceObject">The service object that has been modified.</param>

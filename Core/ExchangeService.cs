@@ -24,7 +24,6 @@
  */
 
 using System.Security.Cryptography;
-using Microsoft.Exchange.WebServices.Settings;
 
 namespace Microsoft.Exchange.WebServices.Data
 {
@@ -5132,8 +5131,8 @@ namespace Microsoft.Exchange.WebServices.Data
         public ExchangeService(ExchangeVersion requestedServerVersion, bool checkCertificates, bool enableNegotiateAuth = true)
             : base(requestedServerVersion)
 		{
-			GlobalSettings.CheckCertificates = checkCertificates;
-			GlobalSettings.IsNegotiateAuthEnabled = enableNegotiateAuth;
+			this.CheckCertificates = checkCertificates;
+			this.IsNegotiateAuthEnabled = enableNegotiateAuth;
 		}
 
         /// <summary>

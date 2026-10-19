@@ -23,8 +23,6 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-using Microsoft.Exchange.WebServices.Settings;
-
 namespace Microsoft.Exchange.WebServices.Data
 {
     using System;
@@ -78,7 +76,16 @@ namespace Microsoft.Exchange.WebServices.Data
         /// Occurs when the http response headers of a server call is captured.
         /// </summary>
         public event ResponseHeadersCapturedHandler OnResponseHeadersCaptured;
-        
+
+        /// <summary>
+        /// Occurs after a self-check run following an HTTP 401 response from EWS (see
+        /// <see cref="TryDiagnoseAuthenticationFailure"/>). Unlike <see cref="OnResponseHeadersCaptured"/>,
+        /// invoking this event is itself wrapped in try/catch at the raise site: a throwing
+        /// subscriber must not surface out of the background diagnostic task that raises it,
+        /// where nothing would observe the exception anyway.
+        /// </summary>
+        public event AuthenticationFailureDiagnosedHandler OnAuthenticationFailureDiagnosed;
+
         private ExchangeCredentials credentials;
         private bool useDefaultCredentials;
         private int timeout = 100000;
@@ -102,6 +109,7 @@ namespace Microsoft.Exchange.WebServices.Data
         private IDictionary<string, string> httpResponseHeaders = new Dictionary<string, string>();
         private IEwsHttpWebRequestFactory ewsHttpWebRequestFactory = new EwsHttpWebRequestFactory();
         private bool checkCertificates = true;
+        private bool isNegotiateAuthEnabled = true;
 
         /// <summary>
         /// Shared HttpClient/SocketsHttpHandler reused across SOAP calls within this service instance.
@@ -163,6 +171,13 @@ namespace Microsoft.Exchange.WebServices.Data
         private DateTime? _lastSuccessfulRequestUtc;
         private string _lastFeServer;
 
+        // Diagnostics-only: rate-gate for the authentication self-check (see
+        // TryDiagnoseAuthenticationFailure) — separate from _transportLock, which guards the
+        // HttpClient/handler lifecycle and is an unrelated concern.
+        private readonly object _authProbeLock = new object();
+        private DateTime? _lastAuthProbeUtc;
+        private static readonly TimeSpan _authProbeRateLimit = TimeSpan.FromMinutes(5);
+
         // Diagnostics-only: snapshot of the transport generation just torn down by
         // InvalidateSharedHttpClient, consumed by the next EnsureSharedHttpClient call to log a
         // paired "reset completed" line with both the old and the new ids.
@@ -207,8 +222,6 @@ namespace Microsoft.Exchange.WebServices.Data
             bool acceptGzipEncoding,
             bool allowAutoRedirect)
         {
-			checkCertificates = GlobalSettings.CheckCertificates;
-
             // Verify that the protocol is something that we can handle
             if ((url.Scheme != "http") && (url.Scheme != "https"))
             {
@@ -707,6 +720,9 @@ namespace Microsoft.Exchange.WebServices.Data
                 if (statusCode == HttpStatusCode.Unauthorized)
                 {
                     _consecutive401Count++;
+                    // Must run regardless of TraceEnabled: the whole point is to diagnose a 401
+                    // storm that nobody noticed to turn tracing on for (see NTRNX-2423).
+                    TryDiagnoseAuthenticationFailure();
                 }
             }
 
@@ -727,6 +743,100 @@ namespace Microsoft.Exchange.WebServices.Data
                 lastSuccess.HasValue ? (DateTime.UtcNow - lastSuccess.Value).ToString() : "-"));
         }
 
+        /// <summary>
+        /// Diagnostics-only: after an HTTP 401 response, reproduces — for both "NTLM" and
+        /// "Negotiate" — the same outgoing-token generation step <c>SocketsHttpHandler</c>
+        /// performs internally on every auth handshake attempt, whose failure is otherwise
+        /// swallowed (the handler falls back to the bare 401 with neither exception nor log; see
+        /// NTRNX-2423). Raises <see cref="OnAuthenticationFailureDiagnosed"/> with the resulting
+        /// status per package, at most once every <see cref="_authProbeRateLimit"/> per instance.
+        /// <para>
+        /// The actual check runs on a background <see cref="System.Threading.Tasks.Task"/> that is
+        /// deliberately never awaited: generating the "Negotiate" blob can reach a KDC over the
+        /// network, which is exactly the kind of native Kerberos/GSSAPI path already shown
+        /// unreliable in this incident (see report, timeouts on new connections), so this must
+        /// never add latency to — or block — the real request-completion path that calls it.
+        /// </para>
+        /// </summary>
+        private void TryDiagnoseAuthenticationFailure()
+        {
+            // Validated before the rate-limit window is spent (see lock below): if credentials
+            // aren't the probeable kind, or no transport has been prepared yet, there is nothing
+            // to run, and stamping _lastAuthProbeUtc anyway would silently burn the next 5 minutes
+            // without a single probe ever having executed.
+            Uri url = _snapshotUrl;
+            if (url == null || !(this.Credentials is WebCredentials webCredentials))
+            {
+                return;
+            }
+
+            NetworkCredential networkCredentials = webCredentials.Credentials as NetworkCredential;
+            if (networkCredentials == null)
+            {
+                return;
+            }
+
+            lock (_authProbeLock)
+            {
+                DateTime utcNow = DateTime.UtcNow;
+                if (_lastAuthProbeUtc.HasValue && utcNow - _lastAuthProbeUtc.Value < _authProbeRateLimit)
+                {
+                    return;
+                }
+
+                _lastAuthProbeUtc = utcNow;
+            }
+
+            System.Threading.Tasks.Task.Run(() => RunAuthenticationProbe(url, networkCredentials));
+        }
+
+        private void RunAuthenticationProbe(Uri url, NetworkCredential networkCredentials)
+        {
+            string targetName = "HTTP/" + url.Host;
+            List<string> results = new List<string>();
+
+            foreach (string package in new[] { "NTLM", "Negotiate" })
+            {
+                try
+                {
+                    using (NegotiateAuthentication auth = new NegotiateAuthentication(new NegotiateAuthenticationClientOptions
+                        {
+                            Package = package,
+                            Credential = networkCredentials,
+                            TargetName = targetName,
+                        }))
+                    {
+                        auth.GetOutgoingBlob(ReadOnlySpan<byte>.Empty, out NegotiateAuthenticationStatusCode statusCode);
+                        results.Add(package + "=" + statusCode);
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // The probe failing/throwing is itself diagnostic information — the real
+                    // 401 path never surfaces this at all (see NTRNX-2423).
+                    results.Add(package + "=" + ex.GetType().Name + ": " + ex.Message);
+                }
+            }
+
+            string message = string.Format("Auth probe after 401: {0}", string.Join(", ", results));
+
+            try
+            {
+                this.OnAuthenticationFailureDiagnosed?.Invoke(message);
+            }
+            catch (Exception ex)
+            {
+                // A throwing subscriber must not break this diagnostics-only background task. This
+                // library has no ILogger dependency to report through (see OnAuthenticationFailureDiagnosed
+                // doc comment), but silently dropping the one exception that could make the whole
+                // diagnostic go dark is exactly the failure mode NTRNX-2423 is about — Trace is the
+                // only always-available, dependency-free fallback.
+                System.Diagnostics.Trace.TraceWarning(
+                    "ExchangeServiceBase: a subscriber to OnAuthenticationFailureDiagnosed threw {0}: {1}",
+                    ex.GetType().Name, ex.Message);
+            }
+        }
+
         internal ExchangeCredentials AdjustNtlmAuthentication(Uri url, ExchangeCredentials serviceCredentials)
         {
             if (!(serviceCredentials is WebCredentials))
@@ -740,7 +850,7 @@ namespace Microsoft.Exchange.WebServices.Data
             CredentialCache credentialCache = new CredentialCache();
             credentialCache.Add(credUri, "NTLM", networkCredentials);
             credentialCache.Add(credUri, "Basic", networkCredentials);
-            if (GlobalSettings.IsNegotiateAuthEnabled)
+            if (this.IsNegotiateAuthEnabled)
             {
                 credentialCache.Add(credUri, "Negotiate", networkCredentials);
             }
@@ -1586,6 +1696,19 @@ namespace Microsoft.Exchange.WebServices.Data
         {
             get { return this.checkCertificates; }
             set { this.checkCertificates = value; }
+        }
+
+        /// <summary>
+        /// Controls whether the "Negotiate" auth scheme is added to the credential cache in
+        /// <see cref="AdjustNtlmAuthentication"/>. Defaults to true to preserve the historical
+        /// behavior for callers that never set it. Instance-level (not shared across
+        /// ExchangeService instances) — unlike <see cref="CheckCertificates"/>, which used to be
+        /// shadowed by a process-wide static with the same name/intent (GlobalSettings, removed).
+        /// </summary>
+        public bool IsNegotiateAuthEnabled
+        {
+            get { return this.isNegotiateAuthEnabled; }
+            set { this.isNegotiateAuthEnabled = value; }
         }
 
         /// <summary>
